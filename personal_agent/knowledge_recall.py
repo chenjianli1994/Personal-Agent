@@ -99,14 +99,39 @@ def safe_recall_prompt_item(
     forbidden_text_checker: Callable[[str], Any] | None = None,
     content_limit: int = 1600,
 ) -> dict[str, Any]:
-    content = str(item.get("content") or "").strip()
+    item_uid = str(item.get("item_uid") or "").strip()
+    category = str(item.get("category") or "").strip()
+    source_type = str(item.get("source_type") or "").strip()
+    if not item_uid or not category:
+        return {}
+    if _field_has_forbidden(item_uid, forbidden_text_checker) or _field_has_forbidden(category, forbidden_text_checker):
+        return {}
+    if source_type and _field_has_forbidden(source_type, forbidden_text_checker):
+        return {}
+
+    redacted_fields: list[str] = []
+    title = str(item.get("title") or "").strip()
+    if _field_has_forbidden(title, forbidden_text_checker):
+        title = ""
+        redacted_fields.append("title")
+    source_ref = str(item.get("source_ref") or "").strip()
+    if _field_has_forbidden(source_ref, forbidden_text_checker):
+        source_ref = ""
+        redacted_fields.append("source_ref")
+    content = str(item.get("content") or "").strip()[:content_limit]
+    content_redacted = _field_has_forbidden(content, forbidden_text_checker)
+    if content_redacted:
+        content = ""
+        redacted_fields.append("content")
     payload = {
-        "item_uid": str(item.get("item_uid") or ""),
-        "title": str(item.get("title") or ""),
-        "category": str(item.get("category") or ""),
-        "source_type": str(item.get("source_type") or ""),
-        "source_ref": str(item.get("source_ref") or ""),
-        "content": content[:content_limit],
+        "item_uid": item_uid,
+        "title": title,
+        "category": category,
+        "source_type": source_type,
+        "source_ref": source_ref,
+        "content": content,
+        "content_redacted": content_redacted,
+        "redacted_fields": redacted_fields,
         "confidence": item.get("confidence"),
         "score": item.get("score"),
         "use_count": int(item.get("use_count") or 0),
@@ -114,8 +139,6 @@ def safe_recall_prompt_item(
         "unhelpful_count": int(item.get("unhelpful_count") or 0),
         "last_used_at": str(item.get("last_used_at") or ""),
     }
-    if forbidden_text_checker and forbidden_text_checker(json_dumps(payload)):
-        return {}
     return payload
 
 
@@ -130,17 +153,37 @@ def _normalize_recall_item(item: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _recall_rank(item: dict[str, Any]) -> tuple[float, int, float]:
+def recall_rank_components(item: dict[str, Any]) -> dict[str, float]:
     score = _bounded_float(item.get("score"))
     helpful = int(item.get("helpful_count") or 0)
     use_count = int(item.get("use_count") or 0)
     unhelpful = int(item.get("unhelpful_count") or 0)
     confidence = _bounded_float(item.get("confidence"))
     helpful_rate = helpful / max(1, helpful + unhelpful)
-    use_boost = min(use_count, 20) / 20
+    use_boost = min(use_count, 20) / 20 * 0.04
     unhelpful_penalty = min(unhelpful, 20) * 0.04
-    adjusted = score * 0.7 + confidence * 0.18 + helpful_rate * 0.08 + use_boost * 0.04 - unhelpful_penalty
-    return (round(adjusted, 4), helpful - unhelpful, confidence)
+    return {
+        "score": round(score * 0.7, 6),
+        "confidence": round(confidence * 0.18, 6),
+        "helpful_rate": round(helpful_rate * 0.08, 6),
+        "use_boost": round(use_boost, 6),
+        "unhelpful_penalty": round(unhelpful_penalty, 6),
+    }
+
+
+def _recall_rank(item: dict[str, Any]) -> tuple[float, int, float, str, str]:
+    components = recall_rank_components(item)
+    adjusted = components["score"] + components["confidence"] + components["helpful_rate"] + components["use_boost"] - components["unhelpful_penalty"]
+    helpful = int(item.get("helpful_count") or 0)
+    unhelpful = int(item.get("unhelpful_count") or 0)
+    confidence = _bounded_float(item.get("confidence"))
+    return (round(adjusted, 6), helpful - unhelpful, confidence, str(item.get("last_used_at") or ""), str(item.get("item_uid") or ""))
+
+
+def _field_has_forbidden(text: str, forbidden_text_checker: Callable[[str], Any] | None) -> bool:
+    if not forbidden_text_checker or not text:
+        return False
+    return bool(forbidden_text_checker(text))
 
 
 def _recall_memory_rows(

@@ -12,7 +12,7 @@ from personal_agent.core import llm_gateway as llm_gateway_module
 from personal_agent.core.database import connect, init_db
 from personal_agent.core.knowledge_base import index_knowledge_item_search_entry, search_knowledge
 from personal_agent.core.services_min import approve_memory_candidate
-from personal_agent.knowledge_recall import recall_knowledge, record_recall_feedback
+from personal_agent.knowledge_recall import recall_knowledge, recall_rank_components, record_recall_feedback, safe_recall_prompt_item, _recall_rank
 
 
 LLMResult = getattr(llm_gateway_module, "LLMResult")
@@ -177,6 +177,41 @@ def test_helpful_and_unhelpful_feedback_do_not_update_last_used_at(tmp_path: Pat
     assert unhelpful["last_used_at"] == ""
 
 
+def test_safe_recall_prompt_item_redacts_fields_without_dropping_usable_item() -> None:
+    polluted = FORBIDDEN_PERSONAL_TERMS[0]
+    item = {
+        "item_uid": "kb_memory_redaction",
+        "title": f"{polluted} title",
+        "category": "memory_lesson",
+        "source_type": "manual",
+        "source_ref": f"legacy:{polluted}",
+        "content": f"{polluted} body should not be injected",
+        "confidence": 0.8,
+        "score": 0.7,
+    }
+
+    safe = safe_recall_prompt_item(item, forbidden_text_checker=lambda text: [term for term in FORBIDDEN_PERSONAL_TERMS if term in text])
+
+    assert safe["item_uid"] == "kb_memory_redaction"
+    assert safe["category"] == "memory_lesson"
+    assert safe["title"] == ""
+    assert safe["source_ref"] == ""
+    assert safe["content"] == ""
+    assert safe["content_redacted"] is True
+    assert set(safe["redacted_fields"]) == {"title", "source_ref", "content"}
+
+
+def test_safe_recall_prompt_item_drops_forbidden_system_fields() -> None:
+    polluted = FORBIDDEN_PERSONAL_TERMS[0]
+
+    safe = safe_recall_prompt_item(
+        {"item_uid": f"kb_{polluted}", "title": "usable", "category": "memory_lesson", "content": "usable"},
+        forbidden_text_checker=lambda text: [term for term in FORBIDDEN_PERSONAL_TERMS if term in text],
+    )
+
+    assert safe == {}
+
+
 def test_document_generation_records_use_and_helpful_only_after_draft_success(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     _add_active_source(client)
@@ -194,6 +229,81 @@ def test_document_generation_records_use_and_helpful_only_after_draft_success(tm
     assert stats["use_count"] == 1
     assert stats["helpful_count"] == 1
     assert stats["unhelpful_count"] == 0
+
+
+def test_document_generation_only_marks_explicitly_used_memory_helpful(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_active_source(client)
+    first_id = _create_candidate(client, "以后生成 AlphaPrecise 功能规范时保留用户可观察行为")
+    second_id = _create_candidate(client, "以后生成 AlphaPrecise 功能规范时先列边界")
+    _approve_candidate(client, first_id)
+    _approve_candidate(client, second_id)
+    first_uid = f"kb_memory_{first_id}"
+    second_uid = f"kb_memory_{second_id}"
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_artifact_generate":
+            return LLMResult(
+                call_id=705,
+                provider="fake-test",
+                model="precise-helpful-fixture",
+                status="ok",
+                parsed={
+                    "title": "AlphaPrecise 功能规范",
+                    "content_format": "markdown",
+                    "content": "# 功能规范\n\n## 功能目标\n- AlphaPrecise\n\n## 用户可观察行为\n- 保留用户可观察行为\n\n## 输入与输出\n- 输入来自资料\n\n## 状态与异常场景\n- 覆盖边界\n\n## 非目标\n- 不写实现细节\n\n## 验收标准\n- 可验证\n\n## 证据引用\n- source: current_prompt\n",
+                    "memory_item_uids_used": [second_uid],
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaPrecise 功能规范"})
+
+    assert response.status_code == 200, response.json()
+    first_stats = _item_stats(db_path, first_uid)
+    second_stats = _item_stats(db_path, second_uid)
+    assert first_stats["use_count"] == 1
+    assert first_stats["helpful_count"] == 0
+    assert second_stats["use_count"] == 1
+    assert second_stats["helpful_count"] == 1
+
+
+def test_document_generation_without_explicit_used_memory_does_not_mark_helpful(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_active_source(client)
+    candidate_id = _create_candidate(client, "以后生成 AlphaNoHelpful 功能规范时保留用户可观察行为")
+    _approve_candidate(client, candidate_id)
+    item_uid = f"kb_memory_{candidate_id}"
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_artifact_generate":
+            return LLMResult(
+                call_id=706,
+                provider="fake-test",
+                model="no-helpful-fixture",
+                status="ok",
+                parsed={
+                    "title": "AlphaNoHelpful 功能规范",
+                    "content_format": "markdown",
+                    "content": "# 功能规范\n\n## 功能目标\n- AlphaNoHelpful\n\n## 用户可观察行为\n- 保留用户可观察行为\n\n## 输入与输出\n- 输入来自资料\n\n## 状态与异常场景\n- 覆盖边界\n\n## 非目标\n- 不写实现细节\n\n## 验收标准\n- 可验证\n\n## 证据引用\n- source: current_prompt\n",
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaNoHelpful 功能规范"})
+
+    assert response.status_code == 200, response.json()
+    stats = _item_stats(db_path, item_uid)
+    assert stats["use_count"] == 1
+    assert stats["helpful_count"] == 0
 
 
 def test_document_generation_filters_forbidden_legacy_memory_from_prompt_and_accounting(tmp_path: Path, monkeypatch) -> None:
@@ -224,9 +334,12 @@ def test_document_generation_filters_forbidden_legacy_memory_from_prompt_and_acc
 
     assert response.status_code == 200, response.json()
     assert polluted not in captured["user_prompt"]
-    assert json.loads(captured["user_prompt"])["memories"] == []
+    memories = json.loads(captured["user_prompt"])["memories"]
+    assert memories and memories[0]["content_excerpt"] == ""
+    assert memories[0]["content_redacted"] is True
+    assert "content" in memories[0]["redacted_fields"]
     stats = _item_stats(db_path, "kb_memory_doc_polluted")
-    assert stats["use_count"] == 0
+    assert stats["use_count"] == 1
     assert stats["helpful_count"] == 0
 
 
@@ -344,6 +457,46 @@ def test_unhelpful_feedback_lowers_memory_ranking(tmp_path: Path, monkeypatch) -
     assert after.index(first_uid) > after.index(second_uid)
 
 
+def test_recall_rank_components_are_stable_and_last_used_at_only_breaks_ties() -> None:
+    base = recall_rank_components(
+        {
+            "score": 0.6,
+            "confidence": 0.5,
+            "use_count": 3,
+            "helpful_count": 2,
+            "unhelpful_count": 1,
+        }
+    )
+    later = recall_rank_components(
+        {
+            "score": 0.6,
+            "confidence": 0.5,
+            "use_count": 3,
+            "helpful_count": 2,
+            "unhelpful_count": 1,
+        }
+    )
+
+    assert base == later
+    assert set(base) == {"score", "confidence", "helpful_rate", "use_boost", "unhelpful_penalty"}
+
+
+def test_recall_rank_uses_last_used_at_only_as_tie_breaker() -> None:
+    older = {
+        "score": 0.5,
+        "confidence": 0.5,
+        "use_count": 1,
+        "helpful_count": 1,
+        "unhelpful_count": 0,
+        "last_used_at": "2026-01-01T00:00:00Z",
+        "item_uid": "kb_old",
+    }
+    newer = dict(older, item_uid="kb_new", last_used_at="2026-01-02T00:00:00Z")
+
+    assert _recall_rank(older)[:3] == _recall_rank(newer)[:3]
+    assert _recall_rank(older) < _recall_rank(newer)
+
+
 def test_correction_feedback_marks_previous_injected_memory_unhelpful(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     candidate_id = _create_candidate(client, "以后处理 AlphaCorrection 时先给旧规则")
@@ -413,6 +566,8 @@ def test_forbidden_legacy_memory_is_not_injected_or_counted(tmp_path: Path, monk
     assert response.status_code == 200, response.json()
     assert polluted not in captured["user_prompt"]
     metadata = response.json()["message"]["metadata"]
-    assert metadata["injected_memory_item_uids"] == []
+    assert metadata["injected_memory_item_uids"] == ["kb_memory_polluted"]
+    assert metadata["memory_item_uids_used"] == []
     stats = _item_stats(db_path, "kb_memory_polluted")
-    assert stats["use_count"] == 0
+    assert stats["use_count"] == 1
+    assert stats["helpful_count"] == 0

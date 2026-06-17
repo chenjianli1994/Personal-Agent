@@ -262,6 +262,7 @@ class PersonalRuntime:
                 "intent_route": _intent_metadata(route),
                 "injected_knowledge_item_uids": llm["injected_knowledge_item_uids"],
                 "injected_memory_item_uids": llm["injected_memory_item_uids"],
+                "memory_item_uids_used": llm["memory_item_uids_used"],
             }
             message = self._append_message(
                 session_uid,
@@ -427,7 +428,7 @@ class PersonalRuntime:
                 "Apply the user's approved long-term lessons below; they override default behavior.",
                 "Do not claim you generated a draft unless the caller explicitly generated one.",
                 "Do not modify files, apply patches, or create release records in this answer path.",
-                "Return strict JSON: {\"answer\": \"...\", \"used_sources\": [\"...\"], \"limitations\": [\"...\"]}.",
+                "Return strict JSON: {\"answer\": \"...\", \"used_sources\": [\"...\"], \"memory_item_uids_used\": [\"...\"], \"limitations\": [\"...\"]}.",
             ]
         )
         injected_knowledge = [safe_recall_prompt_item(item, forbidden_text_checker=personal_forbidden_hits) for item in (context.get("knowledge") or [])[:5]]
@@ -489,10 +490,13 @@ class PersonalRuntime:
         answer = str(result.parsed.get("answer") or "").strip()
         if not answer:
             return None
+        injected_memory_uids = [str(item.get("item_uid") or "") for item in injected_memories if str(item.get("item_uid") or "").strip()]
+        memory_item_uids_used = _valid_used_uids(result.parsed.get("memory_item_uids_used"), injected_memory_uids)
         return {
             "answer": answer,
             "injected_knowledge_item_uids": [str(item.get("item_uid") or "") for item in injected_knowledge if str(item.get("item_uid") or "").strip()],
-            "injected_memory_item_uids": [str(item.get("item_uid") or "") for item in injected_memories if str(item.get("item_uid") or "").strip()],
+            "injected_memory_item_uids": injected_memory_uids,
+            "memory_item_uids_used": memory_item_uids_used,
             "llm": {
                 "call_id": result.call_id,
                 "provider": result.provider,
@@ -528,9 +532,20 @@ class PersonalRuntime:
             return
         metadata = _loads_json(row["metadata_json"], {})
         item_uids = metadata.get("injected_memory_item_uids") if isinstance(metadata, dict) else []
+        used_uids = metadata.get("memory_item_uids_used") if isinstance(metadata, dict) else []
+        used_uid_set = {str(uid) for uid in (used_uids or []) if str(uid).strip()}
         for item_uid in dict.fromkeys(str(uid) for uid in (item_uids or []) if str(uid).strip()):
             try:
                 record_recall_feedback(self.db_path, item_uid=item_uid, event="unhelpful")
+            except ValueError:
+                continue
+        if not used_uid_set:
+            return
+        for item_uid in dict.fromkeys(str(uid) for uid in (item_uids or []) if str(uid).strip()):
+            if item_uid not in used_uid_set:
+                continue
+            try:
+                record_recall_feedback(self.db_path, item_uid=item_uid, event="helpful")
             except ValueError:
                 continue
 
@@ -606,6 +621,18 @@ def _intent_metadata(route: dict[str, Any]) -> dict[str, Any]:
         "llm": route.get("llm") or {},
         "policy": route.get("policy") or {"allowed": True, "fallback": False, "reason": ""},
     }
+
+
+def _valid_used_uids(value: Any, allowed_uids: list[str]) -> list[str]:
+    allowed = {str(uid) for uid in allowed_uids if str(uid).strip()}
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        uid = str(item or "").strip()
+        if uid in allowed and uid not in result:
+            result.append(uid)
+    return result
 
 
 def _attachment_metadata(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:

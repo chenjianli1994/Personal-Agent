@@ -270,6 +270,14 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
                 content = str(item.get("content_excerpt") or item.get("content") or "").strip()
                 if content:
                     long_term_rules.append(content)
+        used_memory_uids: list[str] = []
+        for item in memories:
+            if isinstance(item, dict):
+                uid = str(item.get("item_uid") or "").strip()
+                content = str(item.get("content_excerpt") or item.get("content") or "").strip()
+                if uid and content and not bool(item.get("content_redacted")):
+                    used_memory_uids.append(uid)
+                    break
         code_impact = payload.get("code_impact") if isinstance(payload.get("code_impact"), dict) else {}
         symbol_names = []
         for item in code_impact.get("candidate_symbols") or code_impact.get("symbols") or []:
@@ -293,6 +301,7 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
                     "boundary": "只生成测试用例规格，不生成测试代码",
                 },
                 "evidence_refs_used": {"source_uids": [source_uid]},
+                "memory_item_uids_used": used_memory_uids[:1],
                 "boundary_confirmation": {"personal_draft_only": True, "writes_formal_artifacts": False, "generates_code_patch": False, "uses_patch_apply": False},
             }
         if artifact_type == "trace_matrix":
@@ -307,6 +316,7 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
                     ],
                 },
                 "evidence_refs_used": {"source_uids": [source_uid]},
+                "memory_item_uids_used": used_memory_uids[:1],
                 "boundary_confirmation": {"personal_draft_only": True, "writes_formal_artifacts": False, "generates_code_patch": False, "uses_patch_apply": False},
             }
         if artifact_type == "functional_spec":
@@ -476,6 +486,7 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
             "content_format": content_format,
             "content": content,
             "evidence_refs_used": {"source_uids": [source_uid]},
+            "memory_item_uids_used": used_memory_uids[:1],
             "boundary_confirmation": {"personal_draft_only": True, "writes_formal_artifacts": False, "generates_code_patch": False, "uses_patch_apply": False},
         }
     question = _extract_user_message(user_prompt)

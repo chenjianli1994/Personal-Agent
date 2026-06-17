@@ -114,6 +114,7 @@ def propose_personal_artifact(
                 "evidence_refs": context["evidence_refs"],
                 "knowledge_refs": context["knowledge_refs"],
                 "memory_refs": context["memory_refs"],
+                "memory_item_uids_used": generated.get("memory_item_uids_used") or [],
                 "boundaries": {
                     "personal_draft_only": True,
                     "writes_release_record": False,
@@ -125,13 +126,19 @@ def propose_personal_artifact(
         make_active=make_active,
         status="active" if quality_passed else "quality_failed",
     )
-    _record_generation_memory_feedback(db_path, memories=context["prompt_memories"], quality_passed=quality_passed)
+    _record_generation_memory_feedback(
+        db_path,
+        memories=context["prompt_memories"],
+        quality_passed=quality_passed,
+        memory_item_uids_used=generated.get("memory_item_uids_used") or [],
+    )
     draft["generation"] = {
         "document_type": document_type,
         "content_format": generated["content_format"],
         "evidence_refs": context["evidence_refs"],
         "knowledge_refs": context["knowledge_refs"],
         "memory_refs": context["memory_refs"],
+        "memory_item_uids_used": generated.get("memory_item_uids_used") or [],
         "skill": draft["metadata"]["generation"]["skill"],
         "template": draft["metadata"]["generation"]["template"],
         "llm": draft["metadata"]["generation"]["llm"],
@@ -230,6 +237,7 @@ def revise_personal_artifact(
             "evidence_refs": context["evidence_refs"],
             "knowledge_refs": context["knowledge_refs"],
             "memory_refs": context["memory_refs"],
+            "memory_item_uids_used": revised.get("memory_item_uids_used") or [],
             "boundaries": {
                 "personal_draft_only": True,
                 "writes_release_record": False,
@@ -246,7 +254,12 @@ def revise_personal_artifact(
         make_active=make_active,
         status="active" if quality_passed else "quality_failed",
     )
-    _record_generation_memory_feedback(db_path, memories=context["prompt_memories"], quality_passed=quality_passed)
+    _record_generation_memory_feedback(
+        db_path,
+        memories=context["prompt_memories"],
+        quality_passed=quality_passed,
+        memory_item_uids_used=revised.get("memory_item_uids_used") or [],
+    )
     return revised_draft
 
 
@@ -525,14 +538,15 @@ def _load_sources(db_path: Path, *, project_id: int, source_uids: list[str] | No
     ]
 
 
-def _record_generation_memory_feedback(db_path: Path, *, memories: list[dict[str, Any]], quality_passed: bool) -> None:
+def _record_generation_memory_feedback(db_path: Path, *, memories: list[dict[str, Any]], quality_passed: bool, memory_item_uids_used: list[str]) -> None:
+    helpful_uids = set(memory_item_uids_used if quality_passed else [])
     for item in memories:
         item_uid = str(item.get("item_uid") or "").strip()
         if not item_uid:
             continue
         try:
             record_recall_feedback(db_path, item_uid=item_uid, event="use")
-            if quality_passed:
+            if item_uid in helpful_uids:
                 record_recall_feedback(db_path, item_uid=item_uid, event="helpful")
         except ValueError:
             continue

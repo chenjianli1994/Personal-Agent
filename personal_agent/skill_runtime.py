@@ -46,6 +46,7 @@ def generate_artifact_with_skill(
         "title": title,
         "content": content,
         "content_format": content_format,
+        "memory_item_uids_used": _memory_item_uids_used(parsed, context),
         "generator": "llm_skill_runtime",
         "llm_call_id": result.call_id,
         "llm_provider": result.provider,
@@ -99,6 +100,7 @@ def revise_artifact_with_skill(
         "title": title,
         "content": content,
         "content_format": content_format,
+        "memory_item_uids_used": _memory_item_uids_used(parsed, context),
         "generator": "llm_skill_revision_runtime",
         "llm_call_id": result.call_id,
         "llm_provider": result.provider,
@@ -137,6 +139,7 @@ def _user_prompt(*, document_type: str, content_format: str, skill: dict[str, An
                 "memory_item_uids": ["string"],
                 "code_evidence": ["string"],
             },
+            "memory_item_uids_used": ["string"],
             "boundary_confirmation": {
                 "personal_draft_only": True,
                 "writes_release_record": False,
@@ -214,6 +217,7 @@ def _revision_user_prompt(
                 "memory_item_uids": ["string"],
                 "code_evidence": ["string"],
             },
+            "memory_item_uids_used": ["string"],
             "boundary_confirmation": {
                 "personal_draft_only": True,
                 "writes_release_record": False,
@@ -305,9 +309,25 @@ def _knowledge_context(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "title": safe_item.get("title"),
                 "category": safe_item.get("category"),
                 "content_excerpt": safe_item.get("content"),
+                "content_redacted": safe_item.get("content_redacted"),
+                "redacted_fields": safe_item.get("redacted_fields") or [],
                 "confidence": safe_item.get("confidence"),
             }
         )
+    return result
+
+
+def _memory_item_uids_used(parsed: dict[str, Any], context: dict[str, Any]) -> list[str]:
+    allowed = {str(item.get("item_uid") or "") for item in (context.get("prompt_memories") or context.get("memories") or []) if str(item.get("item_uid") or "").strip()}
+    raw = parsed.get("memory_item_uids_used")
+    if not isinstance(raw, list):
+        evidence = parsed.get("evidence_refs_used") if isinstance(parsed.get("evidence_refs_used"), dict) else {}
+        raw = evidence.get("memory_item_uids") if isinstance(evidence.get("memory_item_uids"), list) else []
+    result: list[str] = []
+    for item in raw:
+        uid = str(item or "").strip()
+        if uid in allowed and uid not in result:
+            result.append(uid)
     return result
 
 
