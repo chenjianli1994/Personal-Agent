@@ -557,17 +557,17 @@ def _semantic_intent(question: str) -> str:
     asks_process_blocker = any(token in text for token in ["流程卡点", "过程域", "阻塞", "卡在", "卡点"])
     if any(token in text for token in ["知识", "模板", "经验", "规范", "学习", "knowledge", "template", "ÖªÊ¶", "Ä£°å", "¾­Ñé"]):
         return "knowledge"
-    if any(token in text for token in ["受控版本", "评审", "批准", "review", "release", "»ùÏß", "ÆÀÉó"]):
+    if any(token in text for token in ["受控版本", "评审", "批准", "review", "release"]):
         return "review_release"
-    if any(token in text for token in ["闭环", "追溯", "覆盖", "链路", "trace", "±Õ»·", "×·ËÝ", "¸²¸Ç"]):
+    if any(token in text for token in ["闭环", "追溯", "覆盖", "链路", "trace"]):
         return "traceability"
     if any(token in text for token in ["代码", "c ", "c代码", ".c", "测试", "单元", "实现", "code", "test", "´úÂë", "²âÊÔ", "µ¥Ôª", "ÊµÏÖ"]):
         return "code_and_tests"
-    if any(token in text for token in ["quality check", "质量", "门禁", "通过", "finding", "ÖÊÁ¿", "ÃÅ½û", "Í¨¹ý"]):
+    if any(token in text for token in ["quality check", "质量", "门禁", "通过", "finding"]):
         return "check_quality"
     if not asks_not_for_location and any(token in text for token in ["文件", "哪里", "路径", "打开", "产物", "输出", "ÎÄ¼þ", "ÄÄ¸ö", "Â·¾¶", "²úÎï", "Êä³ö"]):
         return "locate_artifact"
-    if asks_process_blocker or any(token in text for token in ["流程", "阶段", "进度", "下一步", "状态", "缺什么", "缺少", "Á÷³Ì", "½×¶Î", "½ø¶È"]):
+    if asks_process_blocker or any(token in text for token in ["流程", "阶段", "进度", "下一步", "状态", "缺什么", "缺少"]):
         return "process_status"
     return "task_status"
 
@@ -576,7 +576,7 @@ def _fake_answer_for_intent(intent: str, prompt: str) -> str:
     if intent == "conversation_quality":
         return (
             "如果你看到连续问题都返回同一句话，通常不是项目证据本身给出了同一个结论，而是对话层退回到了 fake provider 或兜底模板。"
-            "当前修复后的测试模式会把普通工程问题转交给证据型回答器，直接引用 AgentTask、产物、检查记录、追溯、评审和知识库记录；"
+            "当前修复后的测试模式会把普通工程问题转交给证据型回答器，直接引用任务、草稿、检查记录和知识库记录；"
             "只有确实缺少可判断信号时，才会说明证据不足。"
         )
     if intent == "model_identity":
@@ -591,26 +591,26 @@ def _fake_answer_for_intent(intent: str, prompt: str) -> str:
                 if fake_provider
                 else "这是当前配置中的正式 LLM provider；但 Agent 仍不是纯 LLM 直连执行器。"
             )
-            + "平台的任务规划和对话会经过 PersonalLLMGateway；PSL 的 Goal Model、资源检查、失败归因、受控动作、检查结论、追溯和评审落库，以及证据型问答，都是规则、数据库和工具链共同组成的闭环。"
+            + "PersonalAgent 的任务规划和对话会经过 PersonalLLMGateway；目标跟踪、资源检查、失败归因、受控动作、检查结论和证据型问答，都是规则、数据库和工具链共同组成的工作流。"
         )
     if intent == "psl_explanation":
         return (
-            "PSL 是 Problem-Solving Loop，也就是问题解决闭环。它负责维护持续目标、拆解可执行步骤、读取项目资源、调用受控动作、"
-            "记录失败归因和证据结果；受控动作层负责把这些动作限制在受控产物、追溯、检查、评审和版本边界内。"
+            "问题解决循环负责维护持续目标、拆解可执行步骤、读取项目资源、调用受控动作、"
+            "记录失败归因和证据结果；受控动作层负责把这些动作限制在草稿、检查和版本边界内。"
         )
     if intent == "autonomous_capability":
         return (
-            "可以，但这里的“自主完成”不是无边界自动乱改。平台会先用 PSL 维护目标和步骤，再通过受控动作层选择动作；"
+            "可以，但这里的“自主完成”不是无边界自动乱改。系统会先维护目标和步骤，再通过受控动作层选择动作；"
             "高风险结果只生成候选产物并进入检查与人工评审，不能直接绕过评审写入正式版本。"
         )
     if intent == "review_release":
-        return "基于当前平台上下文，评审任务和版本状态需要同时查看：如果 ReviewTask 已批准且检查通过，才建议纳入受控版本；否则应先处理评审意见。"
+        return "基于当前上下文，评审任务和版本状态需要同时查看：如果复核已批准且检查通过，才建议纳入受控版本；否则应先处理评审意见。"
     if intent == "knowledge":
         return "我会把命中的知识库条目作为过程模板、规则或历史经验引用到本次回答中；若命中为空，需要先导入模板、规范或经验文档。"
     if intent == "code_and_tests":
         return "当前回答会检查代码产物、单元测试结果和质量证据；不能只说生成了代码，必须能回到具体产物和验证记录。"
     if intent == "check_quality":
-        return "质量结论必须来自平台的检查记录：当前通过时可以推进复核，未通过时需要按问题修复并重新验证。"
+        return "质量结论必须来自检查记录：当前通过时可以推进复核，未通过时需要按问题修复并重新验证。"
     if intent == "traceability":
         return "当前需求已闭环时，追溯需要至少覆盖需求到设计、代码、测试和证据四类链接；缺任一类都不能宣称闭环完成。"
     if intent == "locate_artifact":
