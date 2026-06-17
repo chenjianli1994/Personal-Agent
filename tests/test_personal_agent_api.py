@@ -1,0 +1,300 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from fastapi.testclient import TestClient
+
+from personal_agent.core import llm_gateway as llm_gateway_module
+from personal_agent.core.database import connect
+from personal_agent.app import create_personal_app
+
+
+LLMResult = getattr(llm_gateway_module, "LLMResult")
+LLMBridge = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+
+
+def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path, Path]:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    return TestClient(create_personal_app(db_path, workspace)), db_path, workspace
+
+
+def _add_source(client: TestClient) -> dict:
+    response = client.post(
+        "/api/personal/sources/text",
+        json={
+            "title": "热管理需求",
+            "content": "水泵需要根据充电状态、环境温度、水温差值和水温阈值进行控制。\n电子风扇需要根据环境温度和水温区间控制启停与转速。",
+            "make_active": True,
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_personal_app_bootstrap_uses_personal_tables(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+
+    context = client.get("/api/personal/context").json()
+    assert context["workspace_uid"] == "local"
+    assert "requirement" + "_id" not in context
+
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM requirements").fetchone()[0] == 0
+        old_session_table = "agent" + "_tasks"
+        assert conn.execute(f"SELECT COUNT(*) FROM {old_session_table}").fetchone()[0] == 0
+        for table in [
+            "personal_sessions",
+            "personal_session_messages",
+            "personal_session_events",
+            "personal_input_sources",
+            "personal_drafts",
+            "personal_draft_revisions",
+            "personal_skills",
+            "personal_skill_versions",
+            "personal_skill_eval_runs",
+        ]:
+            assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+
+
+def test_personal_chat_turn_reuses_session(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    first = client.post("/api/personal/chat/turn", json={"content": "你好，先介绍一下能力边界"})
+    assert first.status_code == 200
+    session_uid = first.json()["session"]["session_uid"]
+
+    second = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "继续"})
+    assert second.status_code == 200
+    assert second.json()["session"]["session_uid"] == session_uid
+
+    sessions = client.get("/api/personal/sessions").json()
+    assert [item["session_uid"] for item in sessions].count(session_uid) == 1
+    assert len(second.json()["session"]["messages"]) == 4
+
+
+def test_personal_analysis_uses_llm_intent_route_and_answer(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+
+    answer = client.post("/api/personal/chat/turn", json={"content": "分析一下我现在的需求资料"})
+    assert answer.status_code == 200, answer.json()
+    message = answer.json()["message"]
+    route = message["metadata"]["intent_route"]
+    assert route["intent"] == "analyze_input_source"
+    assert route["router_source"] == "llm"
+    assert route["llm"]["purpose"] == "personal_intent_route"
+    assert message["metadata"]["llm"]["purpose"] == "personal_chat_answer"
+    assert "我会基于当前输入材料和本会话上下文继续处理" not in message["content"]
+    assert "水泵" in message["content"]
+
+    with connect(db_path) as conn:
+        purposes = [
+            row["purpose"]
+            for row in conn.execute("SELECT purpose FROM llm_call_logs ORDER BY id DESC LIMIT 3").fetchall()
+        ]
+    assert purposes == ["personal_chat_answer", "personal_learning_reflect", "personal_intent_route"]
+
+
+def test_personal_chat_turn_activates_attached_sources_before_routing(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    old = client.post(
+        "/api/personal/sources/text",
+        json={"title": "旧输入材料", "content": "旧材料只描述热管理水泵，不是本轮附件。", "make_active": True},
+    )
+    first = client.post(
+        "/api/personal/sources/text",
+        json={"title": "AGENTS", "content": "AGENTS.md 是项目协作规范文件，要求默认中文回复。", "make_active": False},
+    )
+    second = client.post(
+        "/api/personal/sources/text",
+        json={"title": "风扇需求", "content": "电子风扇需要根据水温区间调速。", "make_active": False},
+    )
+    assert old.status_code == 200
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    answer = client.post(
+        "/api/personal/chat/turn",
+        json={
+            "content": "分析这个文件的需求点",
+            "source_uids": [first.json()["source_uid"], second.json()["source_uid"]],
+        },
+    )
+    assert answer.status_code == 200, answer.json()
+    message = answer.json()["message"]
+    assert message["metadata"]["intent_route"]["intent"] == "analyze_input_source"
+    assert "AGENTS.md" in message["content"]
+    assert "旧材料" not in message["content"]
+    user_message = next(item for item in answer.json()["session"]["messages"] if item["role"] == "user")
+    attachments = user_message["metadata"]["attachments"]
+    assert [item["source_uid"] for item in attachments] == [first.json()["source_uid"], second.json()["source_uid"]]
+    assert attachments[0]["title"] == "AGENTS"
+    assert attachments[0]["source_type"] == "text"
+    assert attachments[0]["original_name"] == "AGENTS"
+
+    sources = client.get("/api/personal/sources").json()
+    active_uids = {item["source_uid"] for item in sources if item["is_active"]}
+    assert active_uids == {first.json()["source_uid"], second.json()["source_uid"]}
+
+
+def test_personal_chat_turn_rejects_too_many_attached_sources(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    created = [
+        client.post(
+            "/api/personal/sources/text",
+            json={"title": f"资料 {index}", "content": f"需求资料 {index}", "make_active": False},
+        ).json()["source_uid"]
+        for index in range(6)
+    ]
+
+    answer = client.post("/api/personal/chat/turn", json={"content": "分析这些附件", "source_uids": created})
+    assert answer.status_code == 400
+    assert "at most 5" in answer.json()["detail"]
+
+
+def test_personal_document_generation_uses_llm_route_and_skill_generation(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+
+    answer = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    assert answer.status_code == 200
+    message = answer.json()["message"]
+    route = message["metadata"]["intent_route"]
+    assert route["intent"] == "generate_document"
+    assert route["target_document_type"] == "requirement_analysis_report"
+    assert message["metadata"]["draft"]["document_type"] == "requirement_analysis_report"
+
+    with connect(db_path) as conn:
+        purposes = [
+            row["purpose"]
+            for row in conn.execute("SELECT purpose FROM llm_call_logs ORDER BY id DESC LIMIT 5").fetchall()
+        ]
+        draft_count = conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0]
+    assert "personal_intent_route" in purposes
+    assert "personal_artifact_generate" in purposes
+    assert draft_count == 1
+
+
+def test_chat_document_quality_failure_returns_failed_draft_and_skill_candidate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_artifact_generate":
+            return LLMResult(
+                call_id=901,
+                provider="fake-test",
+                model="quality-failure-fixture",
+                status="ok",
+                parsed={
+                    "title": "缺章节功能规范",
+                    "content_format": "markdown",
+                    "content": "# 功能规范\n\n## 功能目标\n- 有目标。\n\n## 证据引用\n- source: current_prompt\n",
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+
+    answer = client.post("/api/personal/chat/turn", json={"content": "生成功能规范"})
+    assert answer.status_code == 200, answer.json()
+    message = answer.json()["message"]
+    draft = message["metadata"]["draft"]
+    assert draft["status"] == "quality_failed"
+    assert draft["generation"]["quality"]["passed"] is False
+    assert "required_sections" in draft["generation"]["quality"]["blocking_failures"][0]
+    assert "质量门未通过" in message["content"]
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0] == 1
+        candidate = conn.execute("SELECT * FROM personal_skill_update_candidates ORDER BY id DESC LIMIT 1").fetchone()
+    assert candidate is not None
+    assert candidate["target_skill"] == "functional-spec"
+    assert candidate["source"] == "quality_gate_failure"
+
+
+def test_policy_guard_blocks_document_generation_without_active_source(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+
+    answer = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    assert answer.status_code == 200
+    message = answer.json()["message"]
+    route = message["metadata"]["intent_route"]
+    assert route["intent"] == "answer_only"
+    assert route["policy"]["fallback"] is True
+    assert "没有激活输入材料" in route["policy"]["reason"]
+
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0] == 0
+
+
+def test_low_confidence_route_does_not_execute_generation(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+
+    answer = client.post("/api/personal/chat/turn", json={"content": "低置信 生成需求分析报告"})
+    assert answer.status_code == 200
+    route = answer.json()["message"]["metadata"]["intent_route"]
+    assert route["intent"] == "answer_only"
+    assert route["policy"]["fallback"] is True
+    assert "置信度过低" in route["policy"]["reason"]
+
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0] == 0
+
+
+def test_active_draft_can_be_revised_via_llm_route(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+
+    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    assert generated.status_code == 200
+    draft_uid = generated.json()["message"]["metadata"]["draft"]["draft_uid"]
+
+    revised = client.post("/api/personal/chat/turn", json={"content": "把刚才草稿补充异常场景"})
+    assert revised.status_code == 200
+    message = revised.json()["message"]
+    route = message["metadata"]["intent_route"]
+    assert route["intent"] == "revise_draft"
+    assert message["metadata"]["draft"]["draft_uid"] == draft_uid
+    assert message["metadata"]["draft"]["current_revision"] == 2
+
+
+def test_personal_session_management(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    created = client.post("/api/personal/chat/turn", json={"content": "创建一条可管理会话"}).json()
+    session_uid = created["session"]["session_uid"]
+
+    renamed = client.put(f"/api/personal/sessions/{session_uid}/title", json={"title": "我的会话名称"})
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "我的会话名称"
+
+    deleted = client.delete(f"/api/personal/sessions/{session_uid}")
+    assert deleted.status_code == 200
+    assert client.get(f"/api/personal/sessions/{session_uid}").status_code == 404
+
+
+def test_personal_llm_config_writes_personal_env_keys(tmp_path: Path, monkeypatch) -> None:
+    client, _, workspace = _client(tmp_path, monkeypatch)
+
+    saved = client.put(
+        "/api/personal/llm-config",
+        json={
+            "provider": "openrouter",
+            "model": "openai/gpt-4o-mini",
+            "api_key": "test-openrouter-key",
+            "clear_other_provider_keys": True,
+        },
+    )
+    assert saved.status_code == 200
+    env_text = (workspace / ".env").read_text(encoding="utf-8")
+    assert "PERSONAL_AGENT_LLM_PROVIDER=openrouter" in env_text
+    assert "PERSONAL_AGENT_LLM_MODEL=openai/gpt-4o-mini" in env_text

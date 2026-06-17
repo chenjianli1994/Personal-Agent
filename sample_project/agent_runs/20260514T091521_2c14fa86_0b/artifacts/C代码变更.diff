@@ -1,0 +1,13 @@
+diff --git a/src/thermal_control.c b/src/thermal_control.c
+new file mode 100644
+--- /dev/null
++++ b/src/thermal_control.c
+@@ -0,0 +1,8 @@
++#include "thermal_control.h"
++ThermalOutput ThermalControl_Update(ThermalInput input)
++{
++    ThermalOutput output = {0};
++    output.pump_on = input.charging && input.coolant_temp_c >= 85;
++    output.fan_on = input.ambient_temp_c >= 35 || input.coolant_temp_c >= 85 || !input.sensor_valid;
++    return output;
++}

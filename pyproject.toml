@@ -1,0 +1,33 @@
+[project]
+name = "personal-agent"
+version = "0.1.0"
+description = "Independent local personal agent with its own backend, database, and frontend."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "pydantic",
+  "PyYAML",
+  "uvicorn",
+  "langgraph",
+  "python-docx",
+  "pypdf",
+  "openpyxl",
+  "python-multipart",
+]
+
+[project.scripts]
+personal-agent = "personal_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["personal_agent*"]
+exclude = ["frontend*", "docs*", "tests*"]
+
+[project.optional-dependencies]
+dev = [
+  "httpx",
+  "pytest",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

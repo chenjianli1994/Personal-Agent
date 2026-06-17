@@ -1,0 +1,6 @@
+.venv/
+.pytest_cache/
+__pycache__/
+.personal_agent/
+frontend/node_modules/
+frontend/dist/

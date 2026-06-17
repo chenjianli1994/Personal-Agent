@@ -1,0 +1,13 @@
+fastapi
+pydantic
+PyYAML
+uvicorn
+langgraph
+python-docx
+pypdf
+openpyxl
+python-multipart
+
+[dev]
+httpx
+pytest

@@ -1,0 +1,21 @@
+{
+  "phase": "0B",
+  "passed": true,
+  "summary": "基础样例门禁通过。",
+  "findings": [
+    {
+      "rule_id": "GATE-0B-CODE-ARTIFACT",
+      "severity": "major",
+      "passed": true,
+      "message": "Generated thermal management C code artifact is available.",
+      "evidence_refs": ["生成后的热管理C代码.c"]
+    },
+    {
+      "rule_id": "TRACE_THM_SWE_006",
+      "severity": "major",
+      "passed": true,
+      "message": "THM-SWE-006 has design, code, test and evidence trace refs.",
+      "evidence_refs": ["追溯矩阵.yaml"]
+    }
+  ]
+}

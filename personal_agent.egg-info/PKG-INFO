@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: personal-agent
+Version: 0.1.0
+Summary: Independent local personal agent with its own backend, database, and frontend.
+Requires-Python: >=3.11
+Requires-Dist: fastapi
+Requires-Dist: pydantic
+Requires-Dist: PyYAML
+Requires-Dist: uvicorn
+Requires-Dist: langgraph
+Requires-Dist: python-docx
+Requires-Dist: pypdf
+Requires-Dist: openpyxl
+Requires-Dist: python-multipart
+Provides-Extra: dev
+Requires-Dist: httpx; extra == "dev"
+Requires-Dist: pytest; extra == "dev"

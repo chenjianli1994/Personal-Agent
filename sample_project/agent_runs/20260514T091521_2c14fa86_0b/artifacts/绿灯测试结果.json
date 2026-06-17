@@ -1,0 +1,6 @@
+{
+  "status": "passed",
+  "scenario": "green",
+  "passed_tests": ["test_thermal_control_normal", "test_thermal_control_boundary", "test_thermal_control_exception"],
+  "summary": "All generated unit tests pass after implementation."
+}
