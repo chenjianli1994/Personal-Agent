@@ -407,7 +407,7 @@ def _lesson_type_for_failure_mode(failure_mode: str) -> str:
         return "workflow_lesson"
     if "code" in text or "test" in text:
         return "code_lesson"
-    if "permission" in text or "baseline" in text or "safety" in text:
+    if "permission" in text or "release" in text or "safety" in text:
         return "safety_lesson"
     return "conversation_lesson"
 

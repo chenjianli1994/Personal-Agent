@@ -102,7 +102,7 @@ class ProjectContext(BaseModel):
     aspice_scope: list[str] = Field(default_factory=list)
     template_scope: list[str] = Field(default_factory=list)
     knowledge_scope: list[str] = Field(default_factory=list)
-    current_baseline: str = ""
+    current_release_label: str = ""
 
 
 class RequirementContext(BaseModel):
@@ -308,7 +308,7 @@ class ReviewIssueCloseRequest(BaseModel):
     evidence_refs: list[Any] = Field(default_factory=list)
 
 
-class GateFindingReviewIssueRequest(BaseModel):
+class ReviewIssueLinkRequest(BaseModel):
     review_task_id: int | None = None
 
 
@@ -363,10 +363,10 @@ class AspiceExportRequest(BaseModel):
     requirement_id: str | None = None
 
 
-class BaselineDiffRequest(BaseModel):
+class VersionDiffRequest(BaseModel):
     project_id: int
-    from_baseline_id: int | None = None
-    to_baseline_id: int | None = None
+    from_version_id: int | None = None
+    to_version_id: int | None = None
 
 
 class WaiverCreateRequest(BaseModel):
@@ -413,7 +413,7 @@ class CodeIntegrationApplyRequest(BaseModel):
 
 class AgentTaskCreateRequest(BaseModel):
     project_id: int | None = None
-    requirement_id: str = "THM-SWE-006"
+    requirement_id: str = "REQ-006"
     task_type: str = "swe_main_chain"
     prompt: str
     title: str | None = None
@@ -476,13 +476,13 @@ class AgentProblemSolvingRunRequest(BaseModel):
 
 class AgentR4ClosureRequest(BaseModel):
     project_id: int | None = None
-    requirement_id: str = "THM-SWE-006"
+    requirement_id: str = "REQ-006"
     task_uid: str = ""
-    user_goal: str = "补齐完整 ASPICE 主 V 后半段闭环"
+    user_goal: str = "补齐当前需求的后续闭环"
     execute: bool = True
 
 
-class SemanticGateRunRequest(BaseModel):
+class SemanticCheckRunRequest(BaseModel):
     project_id: int | None = None
     requirement_id: str | None = None
 
