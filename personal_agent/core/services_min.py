@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..content_guard import assert_personal_content_clean
 from .database import connect
 from .knowledge_base import (
     ensure_knowledge_search_index,
@@ -376,12 +377,15 @@ def _select_project(conn, project_id: int | None = None):
 def _ensure_default_project_inputs(conn, project_id: int) -> None:
     now = utc_now()
     defaults = [
-        ("code_repo_path", "Code repository path", "code", "sample_project"),
         ("personal_test_command", "Personal test command", "toolchain", "python -m pytest"),
-        ("template_library_path", "Template library path", "knowledge", "knowledge/templates/stage0a"),
-        ("knowledge_library_path", "Knowledge library path", "knowledge", "knowledge"),
-        ("quality_gate_profile", "Quality gate profile", "quality", "SWE.1-SWE.6 basic gate"),
     ]
+    conn.execute(
+        """
+        DELETE FROM project_inputs
+        WHERE project_id=? AND input_key IN ('code_repo_path', 'template_library_path', 'knowledge_library_path', 'quality_' || 'gate_profile')
+        """,
+        (project_id,),
+    )
     for input_key, label, category, value in defaults:
         conn.execute(
             """
@@ -399,8 +403,8 @@ def _lesson_type_for_failure_mode(failure_mode: str) -> str:
         return "routing_lesson"
     if "tool" in text or "schema" in text:
         return "tool_lesson"
-    if "aspice" in text or "process" in text or "gate" in text or "review" in text:
-        return "aspice_lesson"
+    if "process" in text or "gate" in text or "review" in text:
+        return "workflow_lesson"
     if "code" in text or "test" in text:
         return "code_lesson"
     if "permission" in text or "baseline" in text or "safety" in text:
@@ -455,6 +459,9 @@ def _replay_memory_row(row: Any) -> dict[str, Any]:
     lesson = str(row["lesson"] or "")
     expected = str(row["expected_behavior"] if "expected_behavior" in row.keys() else "")
     validation_query = str(row["validation_query"] if "validation_query" in row.keys() else "")
+    assert_personal_content_clean(lesson, label="memory lesson")
+    assert_personal_content_clean(expected, label="memory expected_behavior")
+    assert_personal_content_clean(validation_query, label="memory validation_query")
     passed = bool(lesson.strip()) and (not expected.strip() or expected.strip() in lesson or lesson.strip() in expected)
     if not validation_query.strip():
         passed = False

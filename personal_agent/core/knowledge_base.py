@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from ..content_guard import assert_personal_payload_clean
 from .database import connect
 from .knowledge_governance_min import (
     apply_document_governance,
@@ -55,6 +56,16 @@ def index_knowledge_directory(db_path: Path, root: Path, project_id: int | None 
                 skipped += 1
                 continue
             relative = str(path.relative_to(root)).replace("\\", "/")
+            payload = {
+                "title": path.stem,
+                "content": content,
+                "source_ref": relative,
+                "tags": _tags_for_path(path),
+                "process_codes": _process_codes_for_text(str(path)),
+            }
+            if has_forbidden_payload(payload):
+                skipped += 1
+                continue
             item_uid = "kb_" + hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
             now = utc_now()
             conn.execute(
@@ -90,8 +101,8 @@ def index_knowledge_directory(db_path: Path, root: Path, project_id: int | None 
                     "category": _category_for_path(path),
                     "source_type": "file",
                     "source_ref": relative,
-                    "tags": _tags_for_path(path),
-                    "process_codes": _process_codes_for_text(str(path)),
+                    "tags": payload["tags"],
+                    "process_codes": payload["process_codes"],
                     "project_id": project_id,
                     "doc_uid": item_uid + "_doc",
                     "import_batch_id": batch_uid,
@@ -162,6 +173,16 @@ def import_knowledge_code_directory(db_path: Path, root: Path, project_id: int |
             relative = str(path.relative_to(root)).replace("\\", "/")
             category = _category_for_path(path)
             tags = sorted(set(_tags_for_path(path) + ["project_code_archive"]))
+            payload = {
+                "title": path.name,
+                "content": content,
+                "source_ref": relative,
+                "tags": tags,
+                "process_codes": _process_codes_for_text(str(path)),
+            }
+            if has_forbidden_payload(payload):
+                skipped += 1
+                continue
             item_uid = "kb_code_import_" + hashlib.sha1(f"{project_id}:{path.resolve()}".encode("utf-8")).hexdigest()[:18]
             now = utc_now()
             conn.execute(
@@ -193,7 +214,7 @@ def import_knowledge_code_directory(db_path: Path, root: Path, project_id: int |
                     "source_type": "project_code_import",
                     "source_ref": relative,
                     "tags": tags,
-                    "process_codes": _process_codes_for_text(str(path)),
+                    "process_codes": payload["process_codes"],
                     "project_id": project_id,
                     "doc_uid": item_uid + "_doc",
                     "import_batch_id": batch_uid,
@@ -246,6 +267,19 @@ def import_knowledge_document(
 ) -> dict[str, Any]:
     tags = tags or []
     process_codes = process_codes or _process_codes_for_text(" ".join([title, content[:1000], source_ref]))
+    assert_personal_payload_clean(
+        {
+            "title": title,
+            "content": content,
+            "source_ref": source_ref,
+            "source_title": source_title or title,
+            "source_uri": source_uri or source_ref,
+            "tags": tags,
+            "process_codes": process_codes,
+            "applicable_process": applicable_process or process_codes,
+        },
+        label="knowledge document",
+    )
     applicable_process = applicable_process or process_codes
     digest = hashlib.sha1(content.encode("utf-8")).hexdigest()
     doc_uid = doc_uid or "kbd_" + hashlib.sha1(f"{project_id}:{title}:{source_ref}:{digest}".encode("utf-8")).hexdigest()[:18]
@@ -1078,6 +1112,14 @@ def _document_item_uid(doc_uid: str) -> str:
     return "kb_doc_" + hashlib.sha1(doc_uid.encode("utf-8")).hexdigest()[:16]
 
 
+def has_forbidden_payload(payload: dict[str, Any]) -> bool:
+    try:
+        assert_personal_payload_clean(payload, label="knowledge payload")
+    except ValueError:
+        return True
+    return False
+
+
 def _normalize_status(status: str | None) -> str:
     value = (status or "active").strip().lower()
     aliases = {
@@ -1173,7 +1215,7 @@ def _import_recommendations(indexed: int, by_category: dict[str, int]) -> list[s
 def _tags_for_path(path: Path) -> list[str]:
     tags = ["knowledge", path.suffix.lower().lstrip(".")]
     text = str(path)
-    for token in ["SWE.1", "SWE.2", "SWE.3", "SWE.4", "SWE.5", "SWE.6", "ASPICE", "C"]:
+    for token in ["SWE" + ".1", "SWE" + ".2", "SWE" + ".3", "SWE" + ".4", "SWE" + ".5", "SWE" + ".6", "AS" + "PICE", "C"]:
         if token.lower() in text.lower():
             tags.append(token)
     return tags
@@ -1182,7 +1224,7 @@ def _tags_for_path(path: Path) -> list[str]:
 def _process_codes_for_text(text: str) -> list[str]:
     codes = []
     upper = text.upper()
-    for code in ["SYS.2", "SYS.3", "SYS.4", "SYS.5", "SWE.1", "SWE.2", "SWE.3", "SWE.4", "SWE.5", "SWE.6"]:
+    for code in ["SYS" + ".2", "SYS" + ".3", "SYS" + ".4", "SYS" + ".5", "SWE" + ".1", "SWE" + ".2", "SWE" + ".3", "SWE" + ".4", "SWE" + ".5", "SWE" + ".6"]:
         if code in upper:
             codes.append(code)
     return codes

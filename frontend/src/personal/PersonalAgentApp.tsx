@@ -1713,7 +1713,7 @@ function learningTypeLabel(type: string): string {
     conversation_lesson: "对话经验",
     routing_lesson: "意图理解",
     tool_lesson: "工具使用",
-    aspice_lesson: "流程经验",
+    workflow_lesson: "流程经验",
     code_lesson: "代码经验",
     safety_lesson: "安全边界",
     style_preference: "表达偏好",
@@ -2314,7 +2314,7 @@ function ConfigSummary({ config }: { config?: PersonalCodebaseConfig }) {
   const repo = asRecord(config?.repository);
   return (
     <div className="codebase-summary">
-      <Tag color={config?.repo_path ? "green" : "orange"}>{config?.repo_path ? "已配置代码库" : "未配置代码库"}</Tag>
+      <Tag color={config?.repo_path ? "green" : "orange"}>{config?.repo_path ? "已配置" : "未配置"}</Tag>
       {config?.repo_path ? <Typography.Text copyable>{config.repo_path}</Typography.Text> : null}
       {repo.last_indexed_at ? <Typography.Text type="secondary">最近索引：{String(repo.last_indexed_at)}</Typography.Text> : null}
     </div>

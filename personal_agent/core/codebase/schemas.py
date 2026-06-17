@@ -142,7 +142,7 @@ class PatchPlan:
     modified_functions: list[str]
     interface_change: bool
     tests_need_update: bool
-    aspice_trace_impact: dict[str, Any]
+    trace_impact: dict[str, Any]
     risk_points: list[str]
     test_suggestions: dict[str, list[str]]
     evidence_refs: dict[str, Any]

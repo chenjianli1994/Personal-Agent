@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from personal_agent.content_guard import personal_forbidden_hits
 from personal_agent.core.collaboration import ensure_collaboration_seed
 from personal_agent.core.database import connect, init_db
 from personal_agent.core.services_min import bootstrap_knowledge, create_project
@@ -85,11 +86,13 @@ def bootstrap_personal_agent(
     init_db(db_path)
     project = create_project(db_path, project_code, project_name, "本机单人 Agent 工作区")
     project_id = int(project["id"])
+    _cleanup_legacy_records(db_path, project_id)
     ensure_default_document_skills(db_path, workspace=workspace, project_id=project_id)
     ensure_collaboration_seed(db_path)
     knowledge_root = workspace / "knowledge"
     if knowledge_root.exists():
         bootstrap_knowledge(db_path, knowledge_root, project_id=project_id)
+        _cleanup_legacy_records(db_path, project_id)
     return PersonalAgentContext(
         db_path=db_path,
         workspace=workspace,
@@ -122,3 +125,70 @@ def _backup_legacy_personal_db(db_path: Path) -> None:
         # Backup is best effort. Startup must never fail just because a dev
         # backend, browser, or SQLite handle is still holding the file.
         return
+
+
+def _cleanup_legacy_records(db_path: Path, project_id: int) -> None:
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            DELETE FROM project_inputs
+            WHERE project_id=? AND input_key IN ('code_repo_path', 'template_library_path', 'knowledge_library_path', 'quality_' || 'gate_profile')
+            """,
+            (project_id,),
+        )
+        polluted_item_ids = [
+            int(row["id"])
+            for row in conn.execute("SELECT id, title, source_ref, content FROM knowledge_items").fetchall()
+            if _row_has_forbidden_text(row, ("title", "source_ref", "content"))
+        ]
+        polluted_doc_ids = [
+            int(row["id"])
+            for row in conn.execute("SELECT id, title, source_ref, source_title, source_uri, summary FROM knowledge_documents").fetchall()
+            if _row_has_forbidden_text(row, ("title", "source_ref", "source_title", "source_uri", "summary"))
+        ]
+        if polluted_doc_ids:
+            placeholders = ",".join("?" for _ in polluted_doc_ids)
+            conn.execute(
+                f"DELETE FROM knowledge_chunks WHERE document_id IN ({placeholders})",
+                polluted_doc_ids,
+            )
+            entry_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    f"SELECT id FROM knowledge_search_entries WHERE document_id IN ({placeholders})",
+                    polluted_doc_ids,
+                ).fetchall()
+            ]
+            if entry_ids:
+                entry_placeholders = ",".join("?" for _ in entry_ids)
+                conn.execute(f"DELETE FROM knowledge_search_fts WHERE rowid IN ({entry_placeholders})", entry_ids)
+            conn.execute(
+                f"DELETE FROM knowledge_search_entries WHERE document_id IN ({placeholders})",
+                polluted_doc_ids,
+            )
+            conn.execute(f"DELETE FROM knowledge_documents WHERE id IN ({placeholders})", polluted_doc_ids)
+        if polluted_item_ids:
+            placeholders = ",".join("?" for _ in polluted_item_ids)
+            entry_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    f"SELECT id FROM knowledge_search_entries WHERE source_kind='item' AND source_id IN ({placeholders})",
+                    polluted_item_ids,
+                ).fetchall()
+            ]
+            if entry_ids:
+                entry_placeholders = ",".join("?" for _ in entry_ids)
+                conn.execute(f"DELETE FROM knowledge_search_fts WHERE rowid IN ({entry_placeholders})", entry_ids)
+            conn.execute(
+                f"DELETE FROM knowledge_search_entries WHERE source_kind='item' AND source_id IN ({placeholders})",
+                polluted_item_ids,
+            )
+            conn.execute(f"DELETE FROM knowledge_items WHERE id IN ({placeholders})", polluted_item_ids)
+
+
+def _row_has_forbidden_text(row: Any, fields: tuple[str, ...]) -> bool:
+    for field in fields:
+        value = str(row[field] or "")
+        if personal_forbidden_hits(value):
+            return True
+    return False

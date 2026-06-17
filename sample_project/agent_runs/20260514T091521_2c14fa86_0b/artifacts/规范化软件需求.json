@@ -1,9 +1,0 @@
-{
-  "requirement_id": "THM-SWE-006",
-  "title": "热管理水泵与风扇控制",
-  "description": "根据充电状态、环境温度、水温差值和水温阈值控制水泵与风扇。",
-  "trigger": "车辆处于充电或热管理请求激活状态，且温度输入发生变化。",
-  "expected_behavior": "系统在正常、边界和异常输入下输出确定的水泵启停、风扇启停和转速控制结果。",
-  "acceptance_criteria": ["normal", "boundary", "exception"],
-  "risk_level": "high"
-}

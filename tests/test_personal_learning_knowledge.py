@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from personal_agent.core.database import connect
+from personal_agent.core.knowledge_base import import_knowledge_code_directory, import_knowledge_document
 from personal_agent.app import create_personal_app
 
 
@@ -43,6 +44,54 @@ def test_personal_knowledge_import_search_and_deprecate_source(tmp_path: Path, m
     )
     assert deprecated.status_code == 200
     assert deprecated.json()["status"] == "deprecated"
+
+
+def test_manual_knowledge_document_import_rejects_forbidden_terms(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+    project_id = client.get("/api/personal/context").json()["project_id"]
+
+    try:
+        import_knowledge_document(
+            db_path,
+            project_id=project_id,
+            title="legacy note",
+            content="This mentions " + "AS" + "PICE and " + "Ga" + "te.",
+            source_ref="notes/legacy.md",
+            tags=["legacy"],
+        )
+    except ValueError as exc:
+        assert "forbidden" in str(exc)
+    else:
+        raise AssertionError("expected forbidden knowledge import to fail")
+
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM knowledge_documents").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM knowledge_items").fetchone()[0] == 0
+
+
+def test_directory_knowledge_import_skips_forbidden_files(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+    project_id = client.get("/api/personal/context").json()["project_id"]
+    knowledge_root = tmp_path / "import_knowledge"
+    knowledge_root.mkdir()
+    (knowledge_root / "clean.md").write_text("normal personal note", encoding="utf-8")
+    (knowledge_root / "legacy.md").write_text("legacy " + "AS" + "PICE " + "base" + "line " + "Ga" + "te note", encoding="utf-8")
+
+    result = import_knowledge_code_directory(db_path, knowledge_root, project_id)
+
+    assert result["indexed"] == 1
+    assert result["skipped"] >= 1
+    with connect(db_path) as conn:
+        refs = [str(row["source_ref"]) for row in conn.execute("SELECT source_ref FROM knowledge_items ORDER BY source_ref").fetchall()]
+    assert refs == ["clean.md", "clean.md"]
 
 
 def test_personal_learning_candidate_immediate_and_approved_memory_flow(tmp_path: Path, monkeypatch) -> None:

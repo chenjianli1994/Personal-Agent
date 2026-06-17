@@ -478,119 +478,6 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
             "evidence_refs_used": {"source_uids": [source_uid]},
             "boundary_confirmation": {"personal_draft_only": True, "writes_formal_artifacts": False, "generates_code_patch": False, "uses_patch_apply": False},
         }
-    if purpose == "agent_request_route":
-        try:
-            payload = json.loads(user_prompt)
-        except Exception:
-            payload = {}
-        message = str(payload.get("user_message") or "")
-        lower = message.lower()
-        negates_action = any(token in lower for token in ["不要推进", "不要执行", "先别执行", "只解释", "只回答", "仅解释", "仅回答", "怎么判断", "如何判断", "是不是可以", "no execution", "answer only"])
-        action_like = any(
-            token in lower
-            for token in [
-                "继续",
-                "推进",
-                "执行",
-                "生成",
-                "修改",
-                "修复",
-                "补齐",
-                "合入",
-                "验证",
-                "测试",
-                "评审",
-                "基线",
-                "落地",
-                "可验收",
-                "自行判断",
-                "自己判断",
-                "不对",
-                "纠正",
-                "应该先",
-                "跳出",
-                "整个热管理系统",
-                "整个系统",
-                "run",
-                "execute",
-                "generate",
-                "modify",
-                "fix",
-                "verify",
-                "test",
-            ]
-        )
-        answer_like = any(token in lower for token in ["解释", "说明", "为什么", "是什么", "总结", "看一下", "状态", "why", "what", "explain"])
-        evidence_answer = any(token in lower for token in ["知识", "模板", "经验", "lesson", "evidence", "证据", "规范", "knowledge"])
-        code_evidence_answer = any(token in lower for token in ["代码", "参考代码", "示例代码", "code", "reference code", "example code", "来源"])
-        route = "engineering_action" if action_like and not negates_action else "answer_only"
-        turn_type = "plan" if route == "engineering_action" and any(token in lower for token in ["规划", "计划", "plan"]) else ("execute_controlled_action" if route == "engineering_action" else "answer")
-        llm_status = payload.get("llm_status") if isinstance(payload.get("llm_status"), dict) else {}
-        feedback_like = any(token in lower for token in ["不一致", "不符合", "不对", "反馈", "失败", "退化", "降智", "没理解", "犯错", "wrong", "incorrect", "feedback", "failed"])
-        feedback_like = feedback_like or any(token in lower for token in ["???", "???", "??", "??", "??", "??", "??", "???", "??", "???", "???"])
-        if feedback_like:
-            route = "answer_only"
-            turn_type = "answer"
-        direct_answer = ""
-        direct_answer_intent = ""
-        # Test fixture only: production routing is performed by the configured LLM.
-        if route == "answer_only" and not evidence_answer and not code_evidence_answer and not feedback_like:
-            if any(token in lower for token in ["模型", "model", "provider", "llm"]):
-                direct_answer_intent = "model_identity"
-                provider_name = str(llm_status.get("provider") or "unknown")
-                model_name = str(llm_status.get("model") or "unknown")
-                fake_provider = bool(llm_status.get("fake_provider")) or provider_name == "fake"
-                direct_answer = (
-                    f"当前对话层接入的是 provider={provider_name} / model={model_name}；"
-                    + (
-                        "这不是全程由真实 LLM 推理，而是本地确定性测试夹具。"
-                        if fake_provider
-                        else "这是平台配置的正式 LLM provider。"
-                    )
-                )
-            elif any(token in lower for token in ["有什么用", "能做什么", "能力", "作用", "capability"]):
-                direct_answer_intent = "agent_capability"
-                direct_answer = "我用于理解你的工程意图，判断本轮是只回答还是进入受控工程动作，并在需要时读取项目证据、知识库摘要和代码索引摘要后再回答。"
-        return {
-            "route": route,
-            "turn_type": turn_type,
-            "requested_scope": "project" if route == "engineering_action" and any(token in lower for token in ["整个", "系统", "项目", "project", "system"]) else ("requirement" if route == "engineering_action" else ("process" if evidence_answer or code_evidence_answer else ("project" if answer_like and "项目" in lower else "meta"))),
-            "evidence_policy": "controlled_project_evidence" if route == "engineering_action" else ("indexed_knowledge_evidence" if evidence_answer or code_evidence_answer else "answer_context_only"),
-            "should_execute": route == "engineering_action",
-            "needs_clarification": False,
-            "confidence": 0.84 if route == "engineering_action" else 0.78,
-            "rationale": "fake provider fixture simulates semantic route selection for repeatable tests; production uses the configured LLM.",
-            "answer_contract": "answer-only 不触发 PSL/ADL；engineering-action 进入受控工程闭环。",
-            "focus_stack": [{"type": "route", "ref": route, "reason": "semantic fixture decision"}],
-            "evidence_need": {
-                "requires_project_context": route == "engineering_action",
-                "requires_knowledge_summary": bool(evidence_answer or code_evidence_answer),
-                "requires_code_index_summary": bool(code_evidence_answer),
-                "claim_risk": "knowledge_or_code_source" if evidence_answer or code_evidence_answer else "none",
-                "rationale": "fake fixture mirrors the LLM evidence_need contract for tests",
-            },
-            "decision_source": "fake_semantic_router_fixture",
-            "direct_answer": direct_answer,
-            "direct_answer_intent": direct_answer_intent,
-            "learning_feedback": {
-                "is_feedback": feedback_like,
-                "failure_mode": "semantic_misread" if feedback_like else "",
-                "root_cause": "用户指出上一轮回答没有对齐其提供的示例或意图" if feedback_like else "",
-                "corrected_behavior": message if feedback_like else "",
-                "add_to_regression": feedback_like,
-                "rationale": "fake fixture mirrors LLM feedback classification" if feedback_like else "",
-            },
-            "state_change_intent": {
-                "changes_controlled_state": route == "engineering_action",
-                "state_change_type": "controlled_project_change" if route == "engineering_action" else "none",
-                "rationale": "fake fixture mirrors the LLM state-change boundary for tests",
-            },
-            "conversation_dependency": {
-                "requires_recent_messages": feedback_like,
-                "topic_carryover": "feedback_context" if feedback_like else "",
-                "rationale": "fake fixture mirrors the LLM conversation-dependency contract for tests",
-            },
-        }
     if purpose == "agent_evidence_gate":
         try:
             payload = json.loads(user_prompt)
@@ -625,99 +512,6 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
             "safe_answer": safe_answer,
             "rationale": "fake provider fixture for evidence self-check; production uses the configured LLM for semantic judgement.",
         }
-    if purpose == "agent_code_example_rerank":
-        try:
-            payload = json.loads(user_prompt)
-        except Exception:
-            payload = {}
-        candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
-        return {
-            "ordered_indices": [int(item.get("index", index)) for index, item in enumerate(candidates) if isinstance(item, dict)],
-            "rationale": "fake provider keeps deterministic candidate order; production uses LLM semantic reranking.",
-        }
-    if purpose == "agent_turn_decision":
-        try:
-            payload = json.loads(user_prompt)
-        except Exception:
-            payload = {}
-        message = str(payload.get("user_message") or "")
-        lower = message.lower()
-        scope_answer_only = any(token in lower for token in ["来说", "讨论", "怎么看", "说明", "解释", "按照整个", "跳出这个需求"])
-        execute = (not scope_answer_only) and any(token in lower for token in ["继续", "推进", "执行", "自己判断", "自行判断", "你决定", "continue", "go on", "execute"])
-        if any(token in lower for token in ["agent", "模型", "llm", "fake", "psl", "运行链路", "智能", "能力", "provider", "runtime"]):
-            scope = "meta"
-            policy = "meta_runtime"
-        elif any(token in lower for token in ["整个", "项目", "系统", "热管理系统", "全局", "project", "system"]):
-            scope = "project"
-            policy = "project_evidence"
-        elif any(token in lower for token in ["行业", "通用", "一般", "领域", "domain"]):
-            scope = "domain"
-            policy = "domain_reasoning"
-        elif any(token in lower for token in ["流程", "过程域", "aspice", "sys", "swe", "process"]):
-            scope = "process"
-            policy = "mixed_project_and_domain"
-        else:
-            scope = "requirement"
-            policy = "requirement_evidence"
-        turn_type = "execute_controlled_action" if execute else "answer"
-        return {
-            "turn_type": turn_type,
-            "requested_scope": scope,
-            "scope_shift": scope != "requirement",
-            "focus_stack": [{"type": scope, "ref": scope, "reason": "fake provider fixture mirrors the semantic turn contract"}],
-            "evidence_policy": policy,
-            "should_execute": execute,
-            "requires_human_review": False,
-            "answer_contract": "按本轮范围组织回答，并标明证据、推断和下一步。",
-            "rationale": "fake provider uses deterministic fixture logic only for repeatable tests; production uses the configured LLM.",
-            "confidence": 0.82,
-        }
-    if purpose == "adl_decision":
-        try:
-            payload = json.loads(user_prompt)
-            candidates = payload.get("candidate_actions") or []
-            selected = candidates[0] if candidates else {}
-        except Exception:
-            selected = {}
-        return {
-            "selected_action_key": selected.get("key", "noop"),
-            "goal": selected.get("title", "Execute the next controlled ASPICE action"),
-            "rationale": selected.get("rationale", "fake provider selected the highest ranked platform candidate"),
-            "confidence": 0.84,
-            "risk_level": selected.get("risk_level", "medium"),
-            "verification_plan": selected.get("verification_plan", []),
-        }
-    if purpose == "agent_task_plan":
-        action_plan: list[dict[str, Any]] | None = None
-        action_goal = ""
-        try:
-            payload = json.loads(user_prompt)
-            action = (payload.get("process_context") or {}).get("action") or {}
-            if isinstance(action.get("plan"), list) and action["plan"]:
-                action_plan = action["plan"]
-            action_goal = str(action.get("goal") or "")
-        except Exception:
-            action_plan = None
-        return {
-            "normalized_intent": {
-                "goal": action_goal or "基于需求执行 ASPICE 主链开发并输出中文候选产物、C 代码、测试和闭环证据",
-                "interpreted_goal": "完成需求到 SYS/SWE 证据、代码、验证、Gate 和评审的闭环",
-                "task_type": "aspice_development",
-                "output_language": "zh-CN",
-                "requires_llm_reasoning": True,
-                "knowledge_strategy": "retrieve_and_apply",
-            },
-            "plan": action_plan or [
-                {"key": "understand_requirement", "title": "理解需求和项目输入"},
-                {"key": "retrieve_knowledge", "title": "检索 ASPICE 模板和项目经验"},
-                {"key": "generate_work_products", "title": "生成中文 ASPICE 过程产物"},
-                {"key": "generate_c_code", "title": "生成或修改 C 代码"},
-                {"key": "verify_and_trace", "title": "执行验证并闭合追溯"},
-                {"key": "run_gate", "title": "执行质量 Gate"},
-                {"key": "prepare_review", "title": "形成评审候选包"},
-            ],
-            "rationale": "fake provider only supports deterministic local tests; production must use a real LLM provider.",
-        }
     question = _extract_user_message(user_prompt)
     intent = _semantic_intent(question)
     answer = _fake_answer_for_intent(intent, user_prompt)
@@ -727,8 +521,8 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
         "needs_clarification": False,
         "clarifying_question": "",
         "answer": answer,
-        "tool_plan": [
-            {"tool": "context_builder", "reason": "读取项目、需求、产物、Gate、追溯、知识库和历史对话"},
+            "tool_plan": [
+            {"tool": "context_builder", "reason": "读取项目、需求、产物、质量检查、追溯、知识库和历史对话"},
             {"tool": "evidence_grounded_answer", "reason": "基于上下文生成中文回答"},
         ],
         "suggested_actions": ["查看需求级流程", "补齐缺失产物", "运行 Gate", "提交评审"],
@@ -846,18 +640,18 @@ def _fake_answer_for_intent(intent: str, prompt: str) -> str:
     if intent == "review_baseline":
         return "基于当前平台上下文，评审任务和基线状态需要同时查看：如果 ReviewTask 已批准且 Gate 通过，才建议纳入受控基线；否则应先处理评审意见。"
     if intent == "knowledge":
-        return "我会把命中的知识库条目作为 ASPICE 模板、过程规则或历史经验引用到本次回答中；若命中为空，需要先导入模板、规范或经验文档。"
+        return "我会把命中的知识库条目作为过程模板、规则或历史经验引用到本次回答中；若命中为空，需要先导入模板、规范或经验文档。"
     if intent == "code_and_tests":
-        return "当前回答会检查 `生成后的热管理C代码.c`、单元测试产物、红绿灯测试结果和 Gate 证据；不能只说生成了代码，必须能回到具体产物和验证记录。"
+        return "当前回答会检查代码产物、单元测试结果和质量证据；不能只说生成了代码，必须能回到具体产物和验证记录。"
     if intent == "gate_quality":
-        return "Gate 结论必须来自平台的 gate_runs 和 gate_findings 记录：当前通过时可以推进评审，未通过时需要按 finding 修复并重新验证。"
+        return "质量结论必须来自平台的检查记录：当前通过时可以推进复核，未通过时需要按问题修复并重新验证。"
     if intent == "traceability":
-        return "当前需求已闭环时，追溯需要至少覆盖需求到设计、代码、测试和证据四类链接；缺任一类都不能宣称 ASPICE 闭环完成。"
+        return "当前需求已闭环时，追溯需要至少覆盖需求到设计、代码、测试和证据四类链接；缺任一类都不能宣称闭环完成。"
     if intent == "locate_artifact":
-        return "我会从当前需求关联的产物索引里定位文件，而不是猜路径；软件需求规格说明.md 可在产物面板中打开对应候选产物查看正文。"
+        return "我会从当前需求关联的产物索引里定位文件，而不是猜路径；对应文档可在产物面板中打开查看正文。"
     if intent == "process_status":
-        return "项目应按需求进入 ASPICE V 模型流程，逐项查看 SYS/SWE 节点、必需产物、审批状态、Gate 状态和下一步动作。"
-    return "我会先解析你的真实意图，再结合项目、需求、产物、Gate、追溯、评审和知识库证据回答；证据不足时会说明缺口。"
+        return "项目应按需求进入结构化流程，逐项查看系统节点、必需产物、审批状态、质量状态和下一步动作。"
+    return "我会先解析你的真实意图，再结合项目、需求、产物、质量检查、追溯、复核和知识库证据回答；证据不足时会说明缺口。"
 
 
 def _fake_defined_terms(text: str) -> list[dict[str, Any]]:

@@ -6,6 +6,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from personal_agent.core import llm_gateway as llm_gateway_module
+from personal_agent.bootstrap import bootstrap_personal_agent
 from personal_agent.core.database import connect
 from personal_agent.app import create_personal_app
 
@@ -58,6 +59,95 @@ def test_personal_app_bootstrap_uses_personal_tables(tmp_path: Path, monkeypatch
             "personal_skill_eval_runs",
         ]:
             assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+
+
+def test_bootstrap_fresh_workspace_does_not_require_knowledge_directory(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    context = bootstrap_personal_agent(db_path, workspace)
+
+    assert context.workspace == workspace.resolve()
+    assert not (workspace / "knowledge").exists()
+    with connect(db_path) as conn:
+        inputs = {
+            str(row["input_key"]): str(row["value"])
+            for row in conn.execute("SELECT input_key, value FROM project_inputs WHERE project_id=?", (context.project_id,)).fetchall()
+        }
+        assert inputs == {"personal_test_command": "python -m pytest"}
+
+
+def test_bootstrap_cleans_polluted_db_records(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    first = bootstrap_personal_agent(db_path, workspace)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_search_fts USING fts5(
+                title, category, source_type, source_ref, heading, tags, process_codes, content
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO project_inputs(project_id, input_key, label, category, value, status, created_at, updated_at)
+            VALUES (?, 'quality_' || 'gate_profile', 'legacy', 'quality', 'SWE' || '.1 ' || 'ga' || 'te', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            """,
+            (first.project_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO knowledge_items(project_id, item_uid, title, category, source_type, source_ref, content, tags_json, confidence, status, created_at, updated_at)
+            VALUES (?, 'kb_polluted', 'legacy ' || 'AS' || 'PICE note', 'reference', 'manual', 'legacy/SWE' || '.1.md', 'Ga' || 'te ' || 'base' || 'line item', '[]', 0.8, 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            """,
+            (first.project_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO knowledge_documents(project_id, doc_uid, title, category, source_type, source_ref, source_title, source_uri, trust_level, import_batch_id, source_owner, source_trust_level, source_version, applicable_project, applicable_process_json, applicable_domain, approval_status, expires_at, supersedes, material_type, code_refs_json, process_codes_json, tags_json, summary, content_hash, status, created_at, updated_at)
+            VALUES (?, 'doc_polluted', 'legacy ' || 'base' || 'line', 'reference', 'manual', 'legacy/' || 'base' || 'line.md', 'legacy SWE' || '.', 'legacy/' || 'Ga' || 'te', 'internal', '', '', 'internal', '', '', '[]', '', 'approved', '', '', 'reference_document', '[]', '[]', '[]', 'AS' || 'PICE ' || 'base' || 'line summary', 'hash', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            """,
+            (first.project_id,),
+        )
+        document_id = int(conn.execute("SELECT id FROM knowledge_documents WHERE doc_uid='doc_polluted'").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO knowledge_chunks(document_id, chunk_index, heading, content, token_hint, status, created_at, updated_at)
+            VALUES (?, 0, 'legacy', 'SWE' || '.1 ' || 'base' || 'line chunk', 4, 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            """,
+            (document_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO knowledge_search_entries(project_id, source_kind, source_id, document_id, item_uid, title, category, source_type, source_ref, heading, tags_json, process_codes_json, status, content_hash, content_preview, updated_at)
+            VALUES (?, 'item', 1, ?, 'kb_polluted', 'legacy ' || 'Ga' || 'te', 'reference', 'manual', 'legacy', '', '[]', '[]', 'active', 'hash', 'Ga' || 'te preview', '2026-01-01T00:00:00Z')
+            """,
+            (first.project_id, document_id),
+        )
+        entry_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO knowledge_search_fts(rowid, title, category, source_type, source_ref, heading, tags, process_codes, content)
+            VALUES (?, 'legacy ' || 'Ga' || 'te', 'reference', 'manual', 'legacy', '', '', '', 'AS' || 'PICE ' || 'base' || 'line content')
+            """,
+            (entry_id,),
+        )
+
+    second = bootstrap_personal_agent(db_path, workspace)
+    assert second.project_id == first.project_id
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM project_inputs WHERE input_key='quality_' || 'gate_profile'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM knowledge_items WHERE item_uid='kb_polluted'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM knowledge_documents WHERE doc_uid='doc_polluted'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM knowledge_chunks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM knowledge_search_entries").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM knowledge_search_fts").fetchone()[0] == 0
 
 
 def test_personal_chat_turn_reuses_session(tmp_path: Path, monkeypatch) -> None:

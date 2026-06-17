@@ -42,9 +42,7 @@ Git 里最近两个关键提交：
 E:\codex_pro\PersonalAgent
 ├─ personal_agent/          # 后端主代码
 ├─ frontend/                # 前端代码
-├─ knowledge/               # 启动时导入的知识/模板资产
 ├─ tests/                   # personal 项目测试集
-├─ sample_project/          # 示例输入与产物样例
 ├─ .venv/                   # 当前仓库自己的 Python 虚拟环境
 ├─ .personal_agent/         # 本地运行时数据目录
 ├─ pyproject.toml           # Python 包与入口定义
@@ -285,8 +283,7 @@ npm run build
    - 后续升级依赖时可以统一处理
 
 3. 仓库根目录当前可能存在本地未跟踪文件 `CLAUDE.md`
-   - 这是本地协作辅助文件，不属于本次核心交付基线
-   - 后续处理前先确认是否要纳入版本控制
+   - 先确认它是否属于项目协作说明，再决定是否纳入版本控制
 
 ## 11. 一句话结论
 

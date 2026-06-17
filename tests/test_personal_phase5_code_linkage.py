@@ -57,6 +57,7 @@ def test_personal_phase5_code_patch_draft_uses_patch_propose_and_apply_policy(tm
     assert draft["artifact_type"] == "c_code_diff"
     assert draft["content_format"] == "diff"
     assert "return 0;" in draft["content"]
+    assert draft["metadata"]["generation"]["patch_propose"]["patch_plan"]["trace_impact"]["implementation_stage"] == "code_change"
     assert draft["metadata"]["generation"]["boundaries"]["uses_patch_propose"] is True
     assert draft["metadata"]["generation"]["boundaries"]["writes_real_code"] is False
     assert "return -1;" in source.read_text(encoding="utf-8")

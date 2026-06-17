@@ -21,4 +21,5 @@ python -m venv .venv
 cd frontend
 npm install
 npm run build
+npm run typecheck
 ```

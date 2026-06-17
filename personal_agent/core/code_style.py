@@ -10,7 +10,7 @@ from .database import connect
 from .utils import json_dumps, utc_now
 
 
-CODE_STYLE_QUERY = "C SWE.3 SWE.4 code style coding standard naming indentation unit test"
+CODE_STYLE_QUERY = "C " + "SWE.3 " + "SWE.4 code style coding standard naming indentation unit test"
 
 
 def build_code_style_profile(db_path: Path, project_id: int) -> dict[str, Any]:

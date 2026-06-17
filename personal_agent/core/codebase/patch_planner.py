@@ -137,11 +137,11 @@ def _build_patch_plan(
         modified_functions=modified_functions,
         interface_change=interface_change,
         tests_need_update=tests_need_update,
-        aspice_trace_impact={
+        trace_impact={
             "requirement_id": request.requirement_id,
-            "process_area": "SWE.3",
+            "implementation_stage": "code_change",
             "work_products": ["c_code_diff", "unit_test_diff" if tests_need_update else "test_suggestion"],
-            "trace_policy": "candidate patch must be verified and reviewed before baseline",
+            "trace_policy": "candidate patch must be verified and reviewed before controlled merge",
         },
         risk_points=risks,
         test_suggestions=_test_suggestions(impact, impacted_tests),
@@ -317,7 +317,7 @@ def _plan_payload(plan: PatchPlan) -> dict[str, Any]:
         "modified_functions": plan.modified_functions,
         "interface_change": plan.interface_change,
         "tests_need_update": plan.tests_need_update,
-        "aspice_trace_impact": plan.aspice_trace_impact,
+        "trace_impact": plan.trace_impact,
         "risk_points": plan.risk_points,
         "test_suggestions": plan.test_suggestions,
         "evidence_refs": plan.evidence_refs,

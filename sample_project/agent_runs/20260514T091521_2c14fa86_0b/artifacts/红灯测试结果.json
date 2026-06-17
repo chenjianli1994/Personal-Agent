@@ -1,6 +1,0 @@
-{
-  "status": "failed",
-  "scenario": "red",
-  "failed_tests": ["test_thermal_control_boundary"],
-  "summary": "Boundary test failed before implementation."
-}
