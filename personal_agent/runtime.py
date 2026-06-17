@@ -11,10 +11,11 @@ from personal_agent.core.database import connect
 from personal_agent.core.utils import json_dumps, utc_now
 
 from .artifact_generation import propose_personal_artifact, revise_personal_artifact
-from .content_guard import assert_personal_content_clean
+from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .context_builder import PersonalContextBuilder
 from .intent_router import PersonalIntentRouter
 from .input_documents import activate_input_sources
+from .knowledge_recall import record_recall_feedback, safe_recall_prompt_item
 from .knowledge_learning import record_personal_feedback, review_latest_session_candidate
 from .learning_reflector import PersonalLearningReflector
 from .policy_guard import apply_personal_policy
@@ -121,6 +122,7 @@ class PersonalRuntime:
             self._touch_session(session_uid, refreshed_context)
             return {"session": self.get_session(session_uid), "message": message}
         reflection = self.learning_reflector.reflect(context)
+        self._record_previous_memory_unhelpful_if_correction(session_uid, reflection)
         if reflection.get("approval_intent") in {"approve_latest", "reject_latest"}:
             message = self._review_latest_learning_turn(session_uid=session_uid, prompt=prompt, reflection=reflection, route=route)
         else:
@@ -254,12 +256,21 @@ class PersonalRuntime:
         llm = self._llm_answer(prompt=prompt, context=context, mode=mode)
         if llm:
             context_name = "input_source" if mode == "input_source_analysis" else "general"
-            return self._append_message(
+            metadata = {
+                "context": context_name,
+                "llm": llm["llm"],
+                "intent_route": _intent_metadata(route),
+                "injected_knowledge_item_uids": llm["injected_knowledge_item_uids"],
+                "injected_memory_item_uids": llm["injected_memory_item_uids"],
+            }
+            message = self._append_message(
                 session_uid,
                 "assistant",
                 llm["answer"],
-                {"context": context_name, "llm": llm["llm"], "intent_route": _intent_metadata(route)},
+                metadata,
             )
+            self._record_injected_recall_use(llm["injected_knowledge_item_uids"] + llm["injected_memory_item_uids"])
+            return message
         answer = "LLM 回答调用不可用，本轮只保留安全回答路径；没有生成草稿、没有修改代码、没有执行工具。"
         return self._append_message(session_uid, "assistant", answer, {"context": "general", "intent_route": _intent_metadata(route), "fallback": True})
 
@@ -413,11 +424,16 @@ class PersonalRuntime:
                 "You are a personal natural-language development Agent.",
                 "Answer in Chinese.",
                 "Use the active input materials, recent conversation, knowledge refs, and code evidence if present.",
+                "Apply the user's approved long-term lessons below; they override default behavior.",
                 "Do not claim you generated a draft unless the caller explicitly generated one.",
                 "Do not modify files, apply patches, or create release records in this answer path.",
                 "Return strict JSON: {\"answer\": \"...\", \"used_sources\": [\"...\"], \"limitations\": [\"...\"]}.",
             ]
         )
+        injected_knowledge = [safe_recall_prompt_item(item, forbidden_text_checker=personal_forbidden_hits) for item in (context.get("knowledge") or [])[:5]]
+        injected_knowledge = [item for item in injected_knowledge if item]
+        injected_memories = [safe_recall_prompt_item(item, forbidden_text_checker=personal_forbidden_hits) for item in (context.get("memories") or [])[:5]]
+        injected_memories = [item for item in injected_memories if item]
         user_prompt = json_dumps(
             {
                 "mode": mode,
@@ -436,6 +452,9 @@ class PersonalRuntime:
                 "active_draft": context.get("active_draft") or {},
                 "recent_messages": context.get("recent_messages") or [],
                 "knowledge_refs": context.get("knowledge_refs") or [],
+                "knowledge": injected_knowledge,
+                "memory_refs": context.get("memory_refs") or [],
+                "memories": injected_memories,
                 "pending_memory_candidates": [
                     {
                         "id": item.get("id"),
@@ -472,6 +491,8 @@ class PersonalRuntime:
             return None
         return {
             "answer": answer,
+            "injected_knowledge_item_uids": [str(item.get("item_uid") or "") for item in injected_knowledge if str(item.get("item_uid") or "").strip()],
+            "injected_memory_item_uids": [str(item.get("item_uid") or "") for item in injected_memories if str(item.get("item_uid") or "").strip()],
             "llm": {
                 "call_id": result.call_id,
                 "provider": result.provider,
@@ -480,6 +501,38 @@ class PersonalRuntime:
                 "purpose": "personal_chat_answer",
             },
         }
+
+    def _record_injected_recall_use(self, item_uids: list[str]) -> None:
+        for item_uid in dict.fromkeys(uid for uid in item_uids if uid):
+            try:
+                record_recall_feedback(self.db_path, item_uid=item_uid, event="use")
+            except ValueError:
+                continue
+
+    def _record_previous_memory_unhelpful_if_correction(self, session_uid: str, reflection: dict[str, Any]) -> None:
+        if not reflection.get("has_learning_signal") or reflection.get("feedback_type") != "correction":
+            return
+        if reflection.get("approval_intent") != "none":
+            return
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT metadata_json
+                FROM personal_session_messages
+                WHERE session_uid=? AND role='assistant'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (session_uid,),
+            ).fetchone()
+        if row is None:
+            return
+        metadata = _loads_json(row["metadata_json"], {})
+        item_uids = metadata.get("injected_memory_item_uids") if isinstance(metadata, dict) else []
+        for item_uid in dict.fromkeys(str(uid) for uid in (item_uids or []) if str(uid).strip()):
+            try:
+                record_recall_feedback(self.db_path, item_uid=item_uid, event="unhelpful")
+            except ValueError:
+                continue
 
     def _touch_session(self, session_uid: str, context: dict[str, Any]) -> None:
         with connect(self.db_path) as conn:

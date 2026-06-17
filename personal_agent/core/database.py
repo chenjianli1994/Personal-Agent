@@ -234,6 +234,10 @@ CREATE TABLE IF NOT EXISTS knowledge_items (
     content TEXT NOT NULL,
     tags_json TEXT NOT NULL DEFAULT '[]',
     confidence REAL NOT NULL DEFAULT 0.7,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    helpful_count INTEGER NOT NULL DEFAULT 0,
+    unhelpful_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active',
     policy_effect_scope TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
@@ -870,7 +874,17 @@ def _ensure_compat_columns(conn: sqlite3.Connection) -> None:
             "updated_by": "INTEGER",
         },
     )
-    _add_columns(conn, "knowledge_items", {"policy_effect_scope": "TEXT NOT NULL DEFAULT ''"})
+    _add_columns(
+        conn,
+        "knowledge_items",
+        {
+            "use_count": "INTEGER NOT NULL DEFAULT 0",
+            "helpful_count": "INTEGER NOT NULL DEFAULT 0",
+            "unhelpful_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_used_at": "TEXT NOT NULL DEFAULT ''",
+            "policy_effect_scope": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
     _add_columns(
         conn,
         "memory_candidates",

@@ -12,6 +12,7 @@
 - 最近验收：`pytest -q` 为 `65 passed`，`npm run typecheck` 通过。
 - GitHub 远端：`origin` -> `https://github.com/chenjianli1994/Personal-Agent.git`。
 - 本地常见未跟踪文件：`.env`；本地配置不提交。
+- 待落地方案：`MEMORY_RECALL_OPTIMIZATION_PLAN.md`，目标是修复 approved memory 在聊天回答中的正文召回失效，并补齐 P0+P1 的记忆使用统计回路。
 
 ## 快速启动
 
@@ -81,6 +82,23 @@ cli.py -> app.py -> bootstrap.py -> routes.py -> runtime.py -> feature modules -
 - fake provider 已删除旧死分支，并清理无效乱码触发词和软残留文案。
 - `collaboration.py` 保留模块和 bootstrap 调用，只做术语与权限名收敛。
 
+## 下一步计划
+
+记忆召回与自学习优化已完成方案评审，方案文件为 `MEMORY_RECALL_OPTIMIZATION_PLAN.md`。下一会话可以按该文件直接落地 P0+P1 合并补丁：
+
+1. `personal_agent/core/database.py` 给 `knowledge_items` 增加 `use_count`、`helpful_count`、`unhelpful_count`、`last_used_at` 幂等列。
+2. 新建 `personal_agent/knowledge_recall.py`，统一聊天与文档生成的 knowledge/memory 召回，不在召回阶段记账。
+3. 接入 `context_builder.py`、`artifact_generation.py`、`runtime.py`，让 approved memory 正文进入 `_llm_answer()` prompt，并只在 assistant message 或 draft 成功写库后记录 use/helpful/unhelpful。
+4. 新增 `tests/test_personal_memory_recall.py`，覆盖 approve 前后同进程召回、正文注入、统计记账、content guard 安全摘录和排序回归。
+5. 验收至少运行 `.\.venv\Scripts\python.exe -m pytest -q` 与 `.\.venv\Scripts\python.exe -m pytest tests\test_personal_forbidden_scan.py -q`。
+
+关键约束：
+
+- `knowledge_recall.py` 依赖方向固定为 `context_builder/artifact_generation/runtime -> knowledge_recall -> core/database + core/knowledge_base`，不要反向依赖运行时或生成模块。
+- `recall_knowledge(...)` 只召回不记账；统计只通过显式 `record_recall_feedback(..., event="use|helpful|unhelpful")` 更新。
+- 保留并用测试保护 `approve_memory_candidate()` 批准后调用 `index_knowledge_item_search_entry()` 的索引同步行为。
+- 不修改 `content_guard.py`，不为长期记忆正文开豁免；不安全 memory 摘录跳过注入且不计 use。
+
 ## 工程约束
 
 - 不提交 `.personal_agent/`、`.env`、`.venv/`、`frontend/node_modules/`、`frontend/dist/` 等运行态或本地文件。
@@ -117,7 +135,7 @@ npm run typecheck
 项目路径：E:\codex_pro\PersonalAgent
 
 这是一个本地 PersonalAgent 项目，后端在 personal_agent/，前端在 frontend/。
-请先读 PROJECT_HANDOFF.md、AGENTS.md、README.md。
+请先读 PROJECT_HANDOFF.md、AGENTS.md、README.md、MEMORY_RECALL_OPTIMIZATION_PLAN.md。
 当前验证状态：pytest -q 为 65 passed，frontend 下 npm run typecheck 通过。
 运行态目录和本地配置不提交。
 旧流程禁用词和退休输入键只以 personal_agent/content_guard.py 为准；不要在业务代码、测试或文档里重新手写清单。

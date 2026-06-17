@@ -461,6 +461,7 @@ def search_knowledge(
     limit: int = 5,
     *,
     category: str | None = None,
+    exclude_category: str | None = None,
     source_type: str | None = None,
     process_code: str | None = None,
     status: str | None = None,
@@ -478,6 +479,7 @@ def search_knowledge(
         limit=limit,
         allowed_statuses=allowed_statuses,
         category=category,
+        exclude_category=exclude_category,
         source_type=source_type,
         process_code=process_code,
     )
@@ -490,6 +492,7 @@ def search_knowledge(
         limit=limit,
         allowed_statuses=allowed_statuses,
         category=category,
+        exclude_category=exclude_category,
         source_type=source_type,
         process_code=process_code,
     )
@@ -530,22 +533,32 @@ def _search_knowledge_legacy_scan(
     *,
     allowed_statuses: set[str],
     category: str | None,
+    exclude_category: str | None,
     source_type: str | None,
     process_code: str | None,
 ) -> list[dict[str, Any]]:
     with connect(db_path) as conn:
         if project_id:
-            rows = conn.execute(
-                "SELECT * FROM knowledge_items WHERE project_id=? OR project_id IS NULL ORDER BY updated_at DESC",
-                (project_id,),
-            ).fetchall()
+            where = ["(project_id=? OR project_id IS NULL)"]
+            params: list[Any] = [project_id]
         else:
-            rows = conn.execute("SELECT * FROM knowledge_items ORDER BY updated_at DESC").fetchall()
+            where = ["1=1"]
+            params = []
+        if category:
+            where.append("LOWER(category)=LOWER(?)")
+            params.append(category)
+        if exclude_category:
+            where.append("LOWER(category)<>LOWER(?)")
+            params.append(exclude_category)
+        rows = conn.execute(
+            f"SELECT * FROM knowledge_items WHERE {' AND '.join(where)} ORDER BY updated_at DESC",
+            tuple(params),
+        ).fetchall()
     ranked = []
     for row in rows:
         payload = dict(row)
         tags = _loads_json(payload.pop("tags_json", "[]"))
-        if not _matches_filters(payload, tags, allowed_statuses, category, source_type, process_code):
+        if not _matches_filters(payload, tags, allowed_statuses, category, exclude_category, source_type, process_code):
             continue
         text = _normalize(" ".join([payload["title"], payload["category"], payload["source_ref"], payload["content"][:2000]]))
         score = _lexical_score(normalized_query, text)
@@ -557,30 +570,32 @@ def _search_knowledge_legacy_scan(
         ranked.append(payload)
     with connect(db_path) as conn:
         if project_id:
-            chunks = conn.execute(
-                """
-                SELECT kc.*, kd.project_id, kd.title, kd.category, kd.source_type, kd.source_ref, kd.tags_json, kd.process_codes_json, kd.doc_uid
-                FROM knowledge_chunks kc
-                JOIN knowledge_documents kd ON kd.id = kc.document_id
-                WHERE kd.project_id=? OR kd.project_id IS NULL
-                ORDER BY kd.updated_at DESC, kc.chunk_index
-                """,
-                (project_id,),
-            ).fetchall()
+            where = ["(kd.project_id=? OR kd.project_id IS NULL)"]
+            params: list[Any] = [project_id]
         else:
-            chunks = conn.execute(
-                """
-                SELECT kc.*, kd.project_id, kd.title, kd.category, kd.source_type, kd.source_ref, kd.tags_json, kd.process_codes_json, kd.doc_uid
-                FROM knowledge_chunks kc
-                JOIN knowledge_documents kd ON kd.id = kc.document_id
-                ORDER BY kd.updated_at DESC, kc.chunk_index
-                """
-            ).fetchall()
+            where = ["1=1"]
+            params = []
+        if category:
+            where.append("LOWER(kd.category)=LOWER(?)")
+            params.append(category)
+        if exclude_category:
+            where.append("LOWER(kd.category)<>LOWER(?)")
+            params.append(exclude_category)
+        chunks = conn.execute(
+            f"""
+            SELECT kc.*, kd.project_id, kd.title, kd.category, kd.source_type, kd.source_ref, kd.tags_json, kd.process_codes_json, kd.doc_uid
+            FROM knowledge_chunks kc
+            JOIN knowledge_documents kd ON kd.id = kc.document_id
+            WHERE {" AND ".join(where)}
+            ORDER BY kd.updated_at DESC, kc.chunk_index
+            """,
+            tuple(params),
+        ).fetchall()
     for row in chunks:
         payload = dict(row)
         tags = _loads_json(payload.pop("tags_json", "[]"))
         process_codes = _loads_json(payload.pop("process_codes_json", "[]"))
-        if not _matches_filters(payload, tags, allowed_statuses, category, source_type, process_code, process_codes):
+        if not _matches_filters(payload, tags, allowed_statuses, category, exclude_category, source_type, process_code, process_codes):
             continue
         text = _normalize(" ".join([payload["title"], payload["category"], payload["source_ref"], payload.get("heading", ""), payload["content"][:2500]]))
         score = _lexical_score(normalized_query, text)
@@ -781,6 +796,7 @@ def _search_knowledge_index(
     limit: int,
     allowed_statuses: set[str],
     category: str | None,
+    exclude_category: str | None,
     source_type: str | None,
     process_code: str | None,
 ) -> list[dict[str, Any]] | None:
@@ -795,6 +811,12 @@ def _search_knowledge_index(
         if project_id:
             where.append("(e.project_id=? OR e.project_id IS NULL)")
             params.append(project_id)
+        if category:
+            where.append("LOWER(e.category)=LOWER(?)")
+            params.append(category)
+        if exclude_category:
+            where.append("LOWER(e.category)<>LOWER(?)")
+            params.append(exclude_category)
         if allowed_statuses:
             placeholders = ",".join("?" for _ in allowed_statuses)
             where.append(f"e.status IN ({placeholders})")
@@ -815,7 +837,7 @@ def _search_knowledge_index(
             payload = dict(row)
             tags = _loads_json(payload.get("tags_json", "[]"))
             process_codes = _loads_json(payload.get("process_codes_json", "[]"))
-            if not _matches_filters(payload, tags, allowed_statuses, category, source_type, process_code, process_codes):
+            if not _matches_filters(payload, tags, allowed_statuses, category, exclude_category, source_type, process_code, process_codes):
                 continue
             result = _materialize_search_result(conn, payload, tags, process_codes, query)
             if result:
@@ -1146,6 +1168,7 @@ def _matches_filters(
     tags: Any,
     allowed_statuses: set[str],
     category: str | None,
+    exclude_category: str | None,
     source_type: str | None,
     process_code: str | None,
     process_codes: Any = None,
@@ -1153,6 +1176,8 @@ def _matches_filters(
     if _normalize_status(str(payload.get("status", ""))) not in allowed_statuses:
         return False
     if category and str(payload.get("category", "")).lower() != category.lower():
+        return False
+    if exclude_category and str(payload.get("category", "")).lower() == exclude_category.lower():
         return False
     if source_type and str(payload.get("source_type", "")).lower() != source_type.lower():
         return False

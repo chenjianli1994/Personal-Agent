@@ -6,6 +6,9 @@ from typing import Any
 from personal_agent.core import llm_gateway as llm_gateway_module
 from personal_agent.core.utils import json_dumps
 
+from .content_guard import personal_forbidden_hits
+from .knowledge_recall import safe_recall_prompt_item
+
 
 def generate_artifact_with_skill(
     db_path: Path,
@@ -293,13 +296,16 @@ def _source_context(context: dict[str, Any]) -> list[dict[str, Any]]:
 def _knowledge_context(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for item in items[:8]:
+        safe_item = safe_recall_prompt_item(item, forbidden_text_checker=personal_forbidden_hits)
+        if not safe_item:
+            continue
         result.append(
             {
-                "item_uid": item.get("item_uid"),
-                "title": item.get("title"),
-                "category": item.get("category"),
-                "content_excerpt": str(item.get("content") or "")[:1600],
-                "confidence": item.get("confidence"),
+                "item_uid": safe_item.get("item_uid"),
+                "title": safe_item.get("title"),
+                "category": safe_item.get("category"),
+                "content_excerpt": safe_item.get("content"),
+                "confidence": safe_item.get("confidence"),
             }
         )
     return result

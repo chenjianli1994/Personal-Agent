@@ -9,9 +9,10 @@ from personal_agent.core.codebase.patch_planner import propose_patch
 from personal_agent.core.database import connect
 from personal_agent.core.utils import json_dumps
 
-from .content_guard import assert_personal_content_clean
+from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .artifact_quality import validate_generated_artifact
 from .artifact_drafts import create_artifact_draft, get_artifact_draft, revise_artifact_draft_manual
+from .knowledge_recall import recall_knowledge, record_recall_feedback, safe_recall_prompt_item
 from .knowledge_learning import pending_session_memory_candidates
 from .source_semantic_model import build_source_semantic_model
 from .skill_registry import ensure_default_document_skills, load_skill_for_document_type
@@ -124,6 +125,7 @@ def propose_personal_artifact(
         make_active=make_active,
         status="active" if quality_passed else "quality_failed",
     )
+    _record_generation_memory_feedback(db_path, memories=context["prompt_memories"], quality_passed=quality_passed)
     draft["generation"] = {
         "document_type": document_type,
         "content_format": generated["content_format"],
@@ -235,7 +237,7 @@ def revise_personal_artifact(
             },
         }
     }
-    return revise_artifact_draft_manual(
+    revised_draft = revise_artifact_draft_manual(
         db_path,
         project_id=project_id,
         draft_uid=draft_uid,
@@ -244,6 +246,8 @@ def revise_personal_artifact(
         make_active=make_active,
         status="active" if quality_passed else "quality_failed",
     )
+    _record_generation_memory_feedback(db_path, memories=context["prompt_memories"], quality_passed=quality_passed)
+    return revised_draft
 
 
 def propose_personal_code_patch(
@@ -390,8 +394,9 @@ def _generation_context(
     document_type: str = "",
 ) -> dict[str, Any]:
     sources = _load_sources(db_path, project_id=project_id, source_uids=source_uids)
-    knowledge = _load_knowledge(db_path, project_id=project_id, prompt=prompt, category=None)
-    memories = _load_knowledge(db_path, project_id=project_id, prompt=prompt, category="memory_lesson")
+    knowledge = recall_knowledge(db_path, project_id=project_id, query=prompt, limit=5, exclude_category="memory_lesson")
+    memories = recall_knowledge(db_path, project_id=project_id, query=prompt, limit=5, category="memory_lesson")
+    prompt_memories = [item for item in memories if safe_recall_prompt_item(item, forbidden_text_checker=personal_forbidden_hits)]
     session_memories = pending_session_memory_candidates(db_path, project_id=project_id, task_uid=session_task_uid, session_uid=session_task_uid)
     session_skill_candidates = [
         item
@@ -417,17 +422,18 @@ def _generation_context(
         "sources": sources,
         "source_uids": [item["source_uid"] for item in sources],
         "knowledge_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in knowledge],
-        "memory_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in memories],
+        "memory_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in prompt_memories],
         "session_memory_refs": [{"id": item["id"], "title": item["title"]} for item in session_memories],
         "knowledge": knowledge,
         "memories": memories,
+        "prompt_memories": prompt_memories,
         "session_memories": session_memories,
         "session_skill_update_candidates": session_skill_candidates,
         "source_semantic_model": source_semantic_model,
         "evidence_refs": {
             "active_source_uids": [item["source_uid"] for item in sources],
             "knowledge_item_uids": [item["item_uid"] for item in knowledge],
-            "approved_memory_uids": [item["item_uid"] for item in memories],
+            "approved_memory_uids": [item["item_uid"] for item in prompt_memories],
             "session_memory_candidate_ids": [item["id"] for item in session_memories],
             "session_skill_update_candidate_ids": [item["id"] for item in session_skill_candidates],
         },
@@ -519,28 +525,17 @@ def _load_sources(db_path: Path, *, project_id: int, source_uids: list[str] | No
     ]
 
 
-def _load_knowledge(db_path: Path, *, project_id: int, prompt: str, category: str | None) -> list[dict[str, Any]]:
-    terms = [term for term in _keywords(prompt) if len(term) >= 2]
-    with connect(db_path) as conn:
-        query = """
-            SELECT item_uid, title, category, content, confidence
-            FROM knowledge_items
-            WHERE status='active' AND (project_id=? OR project_id IS NULL)
-        """
-        params: list[Any] = [project_id]
-        if category:
-            query += " AND category=?"
-            params.append(category)
-        query += " ORDER BY confidence DESC, id DESC LIMIT 12"
-        rows = conn.execute(query, tuple(params)).fetchall()
-    ranked = []
-    for row in rows:
-        haystack = f"{row['title']} {row['content']}".lower()
-        score = sum(1 for term in terms if term.lower() in haystack)
-        if score or category == "memory_lesson":
-            ranked.append((score, dict(row)))
-    ranked.sort(key=lambda item: (item[0], float(item[1].get("confidence") or 0)), reverse=True)
-    return [item for _, item in ranked[:5]]
+def _record_generation_memory_feedback(db_path: Path, *, memories: list[dict[str, Any]], quality_passed: bool) -> None:
+    for item in memories:
+        item_uid = str(item.get("item_uid") or "").strip()
+        if not item_uid:
+            continue
+        try:
+            record_recall_feedback(db_path, item_uid=item_uid, event="use")
+            if quality_passed:
+                record_recall_feedback(db_path, item_uid=item_uid, event="helpful")
+        except ValueError:
+            continue
 
 
 def _unit_test_code_or_diff(context: dict[str, Any]) -> str:
@@ -719,11 +714,6 @@ def _format_macro_type_variable_impacts(impact: dict[str, Any]) -> str:
     ]
     lines = [*macro_lines, *type_lines, *variable_lines]
     return "\n".join(f"- {line}" for line in lines) if lines else "- no macro/type/variable evidence available"
-
-
-def _keywords(text: str) -> list[str]:
-    normalized = "".join(ch if ch.isalnum() else " " for ch in text)
-    return [item.strip() for item in normalized.split() if item.strip()]
 
 
 def _loads_json(text: str, default: Any) -> Any:

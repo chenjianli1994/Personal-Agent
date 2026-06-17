@@ -6,6 +6,7 @@ from typing import Any
 
 from personal_agent.core.codebase.index_store import latest_repository
 from personal_agent.core.database import connect
+from .knowledge_recall import recall_knowledge_for_context
 from .knowledge_learning import pending_session_memory_candidates
 
 
@@ -59,15 +60,6 @@ class PersonalContextBuilder:
                 """,
                 (session_uid,),
             ).fetchall()
-            knowledge = conn.execute(
-                """
-                SELECT item_uid, title, category, confidence
-                FROM knowledge_items
-                WHERE status='active' AND (project_id=? OR project_id IS NULL)
-                ORDER BY confidence DESC, id DESC LIMIT 8
-                """,
-                (self.project_id,),
-            ).fetchall()
         source_payload = [
             {
                 "source_uid": row["source_uid"],
@@ -79,6 +71,7 @@ class PersonalContextBuilder:
             }
             for row in sources
         ]
+        recalled = recall_knowledge_for_context(self.db_path, project_id=self.project_id, query=prompt, limit=8)
         session_memories = pending_session_memory_candidates(self.db_path, project_id=self.project_id, session_uid=session_uid)
         return {
             "prompt": prompt,
@@ -87,7 +80,10 @@ class PersonalContextBuilder:
             "active_source_uids": [item["source_uid"] for item in source_payload],
             "active_draft": dict(draft) if draft else {},
             "recent_messages": [dict(row) for row in reversed(messages)],
-            "knowledge_refs": [dict(row) for row in knowledge],
+            "knowledge_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in recalled["knowledge"]],
+            "memory_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in recalled["memories"]],
+            "knowledge": recalled["knowledge"],
+            "memories": recalled["memories"],
             "pending_memory_candidates": session_memories,
             "code_evidence": latest_repository(self.db_path, self.project_id) or {},
             "requirement_summary": _requirement_summary(source_payload, prompt),
