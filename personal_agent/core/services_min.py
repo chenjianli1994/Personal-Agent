@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..content_guard import assert_personal_content_clean
+from ..content_guard import RETIRED_PROJECT_INPUT_KEYS, assert_personal_content_clean
 from .database import connect
 from .knowledge_base import (
     ensure_knowledge_search_index,
@@ -382,9 +382,9 @@ def _ensure_default_project_inputs(conn, project_id: int) -> None:
     conn.execute(
         """
         DELETE FROM project_inputs
-        WHERE project_id=? AND input_key IN ('code_repo_path', 'template_library_path', 'knowledge_library_path', 'quality_' || 'gate_profile')
+        WHERE project_id=? AND input_key IN (?, ?, ?, ?)
         """,
-        (project_id,),
+        (project_id, *RETIRED_PROJECT_INPUT_KEYS),
     )
     for input_key, label, category, value in defaults:
         conn.execute(
@@ -403,7 +403,7 @@ def _lesson_type_for_failure_mode(failure_mode: str) -> str:
         return "routing_lesson"
     if "tool" in text or "schema" in text:
         return "tool_lesson"
-    if "process" in text or "gate" in text or "review" in text:
+    if "process" in text or "check" in text or "review" in text:
         return "workflow_lesson"
     if "code" in text or "test" in text:
         return "code_lesson"

@@ -420,7 +420,7 @@ def _confidence(files: list[dict[str, Any]], symbols: list[dict[str, Any]], quer
 
 def _terms(text: str) -> set[str]:
     tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,}", text.lower())
-    stop = {"the", "and", "for", "with", "from", "this", "that", "agent", "aspice"}
+    stop = {"the", "and", "for", "with", "from", "this", "that", "agent"}
     return {token for token in tokens if token not in stop}
 
 

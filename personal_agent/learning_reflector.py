@@ -26,7 +26,7 @@ class PersonalLearningReflector:
         self.project_id = project_id
 
     def reflect(self, context: dict[str, Any], *, task_uid: str = "") -> dict[str, Any]:
-        gateway_class = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+        gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         system_prompt = "\n".join(
             [
                 "You are the learning-signal reflector for a personal natural-language development Agent.",

@@ -20,7 +20,7 @@ def generate_artifact_with_skill(
     template = context.get("template") if isinstance(context.get("template"), dict) else {}
     user_prompt = _user_prompt(document_type=document_type, content_format=content_format, skill=skill, context=context, template=template)
     try:
-        gateway_class = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+        gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         result = gateway_class(db_path).complete_json(
             purpose="personal_artifact_generate",
             system_prompt=system_prompt,
@@ -75,7 +75,7 @@ def revise_artifact_with_skill(
         feedback=feedback,
     )
     try:
-        gateway_class = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+        gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         result = gateway_class(db_path).complete_json(
             purpose="personal_artifact_revise",
             system_prompt=system_prompt,

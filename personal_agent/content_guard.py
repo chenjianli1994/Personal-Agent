@@ -19,6 +19,13 @@ FORBIDDEN_PERSONAL_TERMS = (
     "正式 artifact",
 )
 
+RETIRED_PROJECT_INPUT_KEYS = (
+    "code_repo_path",
+    "template_library_path",
+    "knowledge_library_path",
+    "quality_gate_profile",
+)
+
 SEARCHABLE_KNOWLEDGE_FIELDS = ("title", "content", "source_ref", "source_title", "source_uri")
 SEARCHABLE_SEQUENCE_FIELDS = ("tags", "process_codes", "applicable_process")
 

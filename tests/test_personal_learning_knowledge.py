@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS
 from personal_agent.core.database import connect
 from personal_agent.core.knowledge_base import import_knowledge_code_directory, import_knowledge_document
 from personal_agent.app import create_personal_app
@@ -59,7 +60,7 @@ def test_manual_knowledge_document_import_rejects_forbidden_terms(tmp_path: Path
             db_path,
             project_id=project_id,
             title="legacy note",
-            content="This mentions " + "AS" + "PICE and " + "Ga" + "te.",
+            content=f"This mentions {FORBIDDEN_PERSONAL_TERMS[0]} and {FORBIDDEN_PERSONAL_TERMS[4]}.",
             source_ref="notes/legacy.md",
             tags=["legacy"],
         )
@@ -83,7 +84,10 @@ def test_directory_knowledge_import_skips_forbidden_files(tmp_path: Path, monkey
     knowledge_root = tmp_path / "import_knowledge"
     knowledge_root.mkdir()
     (knowledge_root / "clean.md").write_text("normal personal note", encoding="utf-8")
-    (knowledge_root / "legacy.md").write_text("legacy " + "AS" + "PICE " + "base" + "line " + "Ga" + "te note", encoding="utf-8")
+    (knowledge_root / "legacy.md").write_text(
+        f"legacy {FORBIDDEN_PERSONAL_TERMS[0]} {FORBIDDEN_PERSONAL_TERMS[5]} {FORBIDDEN_PERSONAL_TERMS[4]} note",
+        encoding="utf-8",
+    )
 
     result = import_knowledge_code_directory(db_path, knowledge_root, project_id)
 

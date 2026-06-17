@@ -407,7 +407,7 @@ class PersonalRuntime:
         )
 
     def _llm_answer(self, *, prompt: str, context: dict[str, Any], mode: str) -> dict[str, Any] | None:
-        gateway_class = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+        gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         system_prompt = "\n".join(
             [
                 "You are a personal natural-language development Agent.",
@@ -538,7 +538,7 @@ class PersonalRuntime:
         }
 
     def llm_status(self) -> dict[str, Any]:
-        gateway_class = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+        gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         return gateway_class(self.db_path).status()
 
 

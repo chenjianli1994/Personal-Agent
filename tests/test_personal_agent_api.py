@@ -7,12 +7,13 @@ from fastapi.testclient import TestClient
 
 from personal_agent.core import llm_gateway as llm_gateway_module
 from personal_agent.bootstrap import bootstrap_personal_agent
+from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS, RETIRED_PROJECT_INPUT_KEYS
 from personal_agent.core.database import connect
 from personal_agent.app import create_personal_app
 
 
 LLMResult = getattr(llm_gateway_module, "LLMResult")
-LLMBridge = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+LLMBridge = getattr(llm_gateway_module, "PersonalLLMGateway")
 
 
 def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path, Path]:
@@ -86,6 +87,11 @@ def test_bootstrap_cleans_polluted_db_records(tmp_path: Path, monkeypatch) -> No
     workspace.mkdir()
 
     first = bootstrap_personal_agent(db_path, workspace)
+    retired_profile_key = RETIRED_PROJECT_INPUT_KEYS[-1]
+    retired_process = FORBIDDEN_PERSONAL_TERMS[0]
+    retired_step = FORBIDDEN_PERSONAL_TERMS[2]
+    retired_check = FORBIDDEN_PERSONAL_TERMS[4]
+    retired_version = FORBIDDEN_PERSONAL_TERMS[5]
     with connect(db_path) as conn:
         conn.execute(
             """
@@ -97,52 +103,64 @@ def test_bootstrap_cleans_polluted_db_records(tmp_path: Path, monkeypatch) -> No
         conn.execute(
             """
             INSERT INTO project_inputs(project_id, input_key, label, category, value, status, created_at, updated_at)
-            VALUES (?, 'quality_' || 'gate_profile', 'legacy', 'quality', 'SWE' || '.1 ' || 'ga' || 'te', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            VALUES (?, ?, 'legacy', 'quality', ?, 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
             """,
-            (first.project_id,),
+            (first.project_id, retired_profile_key, f"{retired_step}1 {retired_check}"),
         )
         conn.execute(
             """
             INSERT INTO knowledge_items(project_id, item_uid, title, category, source_type, source_ref, content, tags_json, confidence, status, created_at, updated_at)
-            VALUES (?, 'kb_polluted', 'legacy ' || 'AS' || 'PICE note', 'reference', 'manual', 'legacy/SWE' || '.1.md', 'Ga' || 'te ' || 'base' || 'line item', '[]', 0.8, 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            VALUES (?, 'kb_polluted', ?, 'reference', 'manual', ?, ?, '[]', 0.8, 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
             """,
-            (first.project_id,),
+            (
+                first.project_id,
+                f"legacy {retired_process} note",
+                f"legacy/{retired_step}1.md",
+                f"{retired_check} {retired_version} item",
+            ),
         )
         conn.execute(
             """
             INSERT INTO knowledge_documents(project_id, doc_uid, title, category, source_type, source_ref, source_title, source_uri, trust_level, import_batch_id, source_owner, source_trust_level, source_version, applicable_project, applicable_process_json, applicable_domain, approval_status, expires_at, supersedes, material_type, code_refs_json, process_codes_json, tags_json, summary, content_hash, status, created_at, updated_at)
-            VALUES (?, 'doc_polluted', 'legacy ' || 'base' || 'line', 'reference', 'manual', 'legacy/' || 'base' || 'line.md', 'legacy SWE' || '.', 'legacy/' || 'Ga' || 'te', 'internal', '', '', 'internal', '', '', '[]', '', 'approved', '', '', 'reference_document', '[]', '[]', '[]', 'AS' || 'PICE ' || 'base' || 'line summary', 'hash', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            VALUES (?, 'doc_polluted', ?, 'reference', 'manual', ?, ?, ?, 'internal', '', '', 'internal', '', '', '[]', '', 'approved', '', '', 'reference_document', '[]', '[]', '[]', ?, 'hash', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
             """,
-            (first.project_id,),
+            (
+                first.project_id,
+                f"legacy {retired_version}",
+                f"legacy/{retired_version}.md",
+                f"legacy {retired_step}",
+                f"legacy/{retired_check}",
+                f"{retired_process} {retired_version} summary",
+            ),
         )
         document_id = int(conn.execute("SELECT id FROM knowledge_documents WHERE doc_uid='doc_polluted'").fetchone()[0])
         conn.execute(
             """
             INSERT INTO knowledge_chunks(document_id, chunk_index, heading, content, token_hint, status, created_at, updated_at)
-            VALUES (?, 0, 'legacy', 'SWE' || '.1 ' || 'base' || 'line chunk', 4, 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            VALUES (?, 0, 'legacy', ?, 4, 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
             """,
-            (document_id,),
+            (document_id, f"{retired_step}1 {retired_version} chunk"),
         )
         conn.execute(
             """
             INSERT INTO knowledge_search_entries(project_id, source_kind, source_id, document_id, item_uid, title, category, source_type, source_ref, heading, tags_json, process_codes_json, status, content_hash, content_preview, updated_at)
-            VALUES (?, 'item', 1, ?, 'kb_polluted', 'legacy ' || 'Ga' || 'te', 'reference', 'manual', 'legacy', '', '[]', '[]', 'active', 'hash', 'Ga' || 'te preview', '2026-01-01T00:00:00Z')
+            VALUES (?, 'item', 1, ?, 'kb_polluted', ?, 'reference', 'manual', 'legacy', '', '[]', '[]', 'active', 'hash', ?, '2026-01-01T00:00:00Z')
             """,
-            (first.project_id, document_id),
+            (first.project_id, document_id, f"legacy {retired_check}", f"{retired_check} preview"),
         )
         entry_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
         conn.execute(
             """
             INSERT INTO knowledge_search_fts(rowid, title, category, source_type, source_ref, heading, tags, process_codes, content)
-            VALUES (?, 'legacy ' || 'Ga' || 'te', 'reference', 'manual', 'legacy', '', '', '', 'AS' || 'PICE ' || 'base' || 'line content')
+            VALUES (?, ?, 'reference', 'manual', 'legacy', '', '', '', ?)
             """,
-            (entry_id,),
+            (entry_id, f"legacy {retired_check}", f"{retired_process} {retired_version} content"),
         )
 
     second = bootstrap_personal_agent(db_path, workspace)
     assert second.project_id == first.project_id
     with connect(db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM project_inputs WHERE input_key='quality_' || 'gate_profile'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM project_inputs WHERE input_key=?", (retired_profile_key,)).fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM knowledge_items WHERE item_uid='kb_polluted'").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM knowledge_documents WHERE doc_uid='doc_polluted'").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM knowledge_chunks").fetchone()[0] == 0
@@ -307,7 +325,7 @@ def test_chat_document_quality_failure_returns_failed_draft_and_skill_candidate(
         candidate = conn.execute("SELECT * FROM personal_skill_update_candidates ORDER BY id DESC LIMIT 1").fetchone()
     assert candidate is not None
     assert candidate["target_skill"] == "functional-spec"
-    assert candidate["source"] == "quality_gate_failure"
+    assert candidate["source"] == "quality_check_failure"
 
 
 def test_policy_guard_blocks_document_generation_without_active_source(tmp_path: Path, monkeypatch) -> None:

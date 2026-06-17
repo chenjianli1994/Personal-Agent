@@ -37,7 +37,7 @@ class PersonalIntentRouter:
         self.project_id = project_id
 
     def route(self, context: dict[str, Any]) -> dict[str, Any]:
-        gateway_class = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+        gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         system_prompt = "\n".join(
             [
                 "You are the semantic intent router for a personal natural-language development Agent.",

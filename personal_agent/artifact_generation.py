@@ -466,7 +466,7 @@ def _record_quality_failure_skill_candidate(
             db_path,
             project_id=project_id,
             target_skill=target_skill,
-            reason=str(reflection.get("reason") or "Quality " + "Ga" + "te failure suggests a reusable Skill rule."),
+            reason=str(reflection.get("reason") or "Quality check failure suggests a reusable Skill rule."),
             proposed_change=proposed_change,
             risk=str(reflection.get("risk") or ""),
             evidence_refs={
@@ -478,7 +478,7 @@ def _record_quality_failure_skill_candidate(
                 "reflection": {"confidence": reflection.get("confidence"), "change_type": reflection.get("change_type")},
             },
             session_uid=session_task_uid,
-            source="quality_" + "gate_failure",
+            source="quality_check_failure",
         )
     except Exception:
         return

@@ -28,7 +28,7 @@ class PersonalSkillReflector:
             "document_type": context.get("document_type") or "",
             "allowed_change_scope": ["Instructions", "Output Contract", "template_rules"],
         }
-        gateway_class = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+        gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         try:
             result = gateway_class(self.db_path).complete_json(
                 purpose="personal_skill_reflect",
@@ -122,8 +122,8 @@ def _quality_failure_reflection(context: dict[str, Any]) -> dict[str, Any]:
         for item in (quality.get("checks") or [])
         if isinstance(item, dict) and not item.get("passed")
     ]
-    quality_gate_label = "Quality " + "Ga" + "te"
-    failure_summary = "；".join(failures[:3]) or quality_gate_label + " 未通过"
+    quality_check_label = "Quality check"
+    failure_summary = "；".join(failures[:3]) or quality_check_label + " 未通过"
     check_summary = "、".join(checks[:5]) or "quality_gate"
     return {
         "has_skill_update_signal": True,
@@ -131,13 +131,13 @@ def _quality_failure_reflection(context: dict[str, Any]) -> dict[str, Any]:
         "confidence": 0.78,
         "target_skill": target_skill,
         "change_type": "quality_gate_instruction_patch",
-        "reason": f"{quality_gate_label} 失败显示 {target_skill} 需要补充生成底线：{failure_summary}",
+        "reason": f"{quality_check_label} 失败显示 {target_skill} 需要补充生成底线：{failure_summary}",
         "proposed_change": (
             "## Instructions\n"
-            f"- 生成前必须自检 {quality_gate_label}：{check_summary}。"
+            f"- 生成前必须自检 {quality_check_label}：{check_summary}。"
             "若模板章节、占位符、格式或证据策略不满足，应重新按模板组织内容，而不是输出不合格草稿。"
         ),
-        "risk": "规则来自一次 " + quality_gate_label + " 失败，批准前只在当前会话作为候选约束使用。",
+        "risk": f"规则来自一次 {quality_check_label} 失败，批准前只在当前会话作为候选约束使用。",
     }
 
 

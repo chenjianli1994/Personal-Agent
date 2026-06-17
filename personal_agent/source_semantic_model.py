@@ -96,7 +96,7 @@ def build_source_semantic_model(
         ],
     }
     try:
-        gateway_class = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+        gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         result = gateway_class(db_path).complete_json(
             purpose="personal_source_semantic_model",
             system_prompt=(

@@ -1167,8 +1167,8 @@ def _matches_filters(
 
 def _category_for_path(path: Path) -> str:
     name = str(path).lower()
-    if "gate" in name:
-        return "gate_rule"
+    if "review" in name or "check" in name:
+        return "review_rule"
     if "需求" in name or "requirement" in name or "srs" in name:
         return "requirement_template"
     if "架构" in name or "architecture" in name:
@@ -1215,19 +1215,14 @@ def _import_recommendations(indexed: int, by_category: dict[str, int]) -> list[s
 def _tags_for_path(path: Path) -> list[str]:
     tags = ["knowledge", path.suffix.lower().lstrip(".")]
     text = str(path)
-    for token in ["SWE" + ".1", "SWE" + ".2", "SWE" + ".3", "SWE" + ".4", "SWE" + ".5", "SWE" + ".6", "AS" + "PICE", "C"]:
+    for token in ["C"]:
         if token.lower() in text.lower():
             tags.append(token)
     return tags
 
 
 def _process_codes_for_text(text: str) -> list[str]:
-    codes = []
-    upper = text.upper()
-    for code in ["SYS" + ".2", "SYS" + ".3", "SYS" + ".4", "SYS" + ".5", "SWE" + ".1", "SWE" + ".2", "SWE" + ".3", "SWE" + ".4", "SWE" + ".5", "SWE" + ".6"]:
-        if code in upper:
-            codes.append(code)
-    return codes
+    return []
 
 
 def _split_chunks(content: str, max_chars: int = 1800) -> list[dict[str, str]]:

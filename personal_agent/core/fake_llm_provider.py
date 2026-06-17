@@ -478,40 +478,6 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
             "evidence_refs_used": {"source_uids": [source_uid]},
             "boundary_confirmation": {"personal_draft_only": True, "writes_formal_artifacts": False, "generates_code_patch": False, "uses_patch_apply": False},
         }
-    if purpose == "agent_evidence_gate":
-        try:
-            payload = json.loads(user_prompt)
-        except Exception:
-            payload = {}
-        question = str(payload.get("user_message") or "")
-        draft = str(payload.get("draft_answer") or "")
-        evidence = payload.get("evidence_inputs") if isinstance(payload.get("evidence_inputs"), dict) else {}
-        summary = evidence.get("code_knowledge_summary") if isinstance(evidence.get("code_knowledge_summary"), dict) else {}
-        text = f"{question}\n{draft}".lower()
-        has_claim = any(token in text for token in ["知识库", "资料", "参考代码", "示例代码", "代码来源", "code source", "reference code", "example code", "knowledge base"])
-        evidence_sufficient = bool(evidence.get("knowledge_or_code_summary_loaded") or evidence.get("knowledge_ref_count") or evidence.get("task_knowledge_brief_loaded"))
-        safe_answer = ""
-        requires_repair = False
-        if has_claim and not evidence_sufficient:
-            requires_repair = True
-            safe_answer = "本轮未读取知识库/代码索引摘要，不能断言知识库是否有资料、是否存在参考代码、代码来源或示例代码是否被使用。"
-        elif has_claim and summary.get("exists") and any(token in draft for token in ["没有可用", "没有参考代码", "知识库无", "不存在参考代码"]):
-            requires_repair = True
-            style = summary.get("style_profile") if isinstance(summary.get("style_profile"), dict) else {}
-            safe_answer = (
-                "本轮已读取轻量代码知识摘要：知识库中存在代码类资料，"
-                f"knowledge_items={summary.get('knowledge_item_count', 0)}，documents={summary.get('document_count', 0)}，"
-                f"chunks={summary.get('chunk_count', 0)}，style_samples={style.get('sample_count', 0)}。"
-                "因此不能说知识库里没有参考代码；准确结论是：生成代码时应允许读取这些示例/风格摘要，是否采用具体片段要以本轮命中的证据为准。"
-            )
-        return {
-            "has_knowledge_or_code_claim": has_claim,
-            "claim_types": ["knowledge_or_code_source"] if has_claim else [],
-            "evidence_sufficient": evidence_sufficient,
-            "requires_repair": requires_repair,
-            "safe_answer": safe_answer,
-            "rationale": "fake provider fixture for evidence self-check; production uses the configured LLM for semantic judgement.",
-        }
     question = _extract_user_message(user_prompt)
     intent = _semantic_intent(question)
     answer = _fake_answer_for_intent(intent, user_prompt)
@@ -597,11 +563,11 @@ def _semantic_intent(question: str) -> str:
         return "traceability"
     if any(token in text for token in ["代码", "c ", "c代码", ".c", "测试", "单元", "实现", "code", "test", "´úÂë", "²âÊÔ", "µ¥Ôª", "ÊµÏÖ"]):
         return "code_and_tests"
-    if any(token in text for token in ["gate", "质量", "门禁", "通过", "finding", "ÖÊÁ¿", "ÃÅ½û", "Í¨¹ý"]):
-        return "gate_quality"
+    if any(token in text for token in ["quality check", "质量", "门禁", "通过", "finding", "ÖÊÁ¿", "ÃÅ½û", "Í¨¹ý"]):
+        return "check_quality"
     if not asks_not_for_location and any(token in text for token in ["文件", "哪里", "路径", "打开", "产物", "输出", "ÎÄ¼þ", "ÄÄ¸ö", "Â·¾¶", "²úÎï", "Êä³ö"]):
         return "locate_artifact"
-    if asks_process_blocker or any(token in text for token in ["流程", "阶段", "进度", "下一步", "aspice", "swe", "sys", "状态", "缺什么", "缺少", "Á÷³Ì", "½×¶Î", "½ø¶È"]):
+    if asks_process_blocker or any(token in text for token in ["流程", "阶段", "进度", "下一步", "状态", "缺什么", "缺少", "Á÷³Ì", "½×¶Î", "½ø¶È"]):
         return "process_status"
     return "task_status"
 
@@ -625,16 +591,16 @@ def _fake_answer_for_intent(intent: str, prompt: str) -> str:
                 if fake_provider
                 else "这是当前配置中的正式 LLM provider；但 Agent 仍不是纯 LLM 直连执行器。"
             )
-            + "平台的任务规划和对话会经过 PersonalLLMGateway；PSL 的 Goal Model、资源检查、失败归因，ADL 的候选动作、受控执行、检查结论、追溯和评审落库，以及证据型问答，都是规则、数据库和工具链共同组成的闭环。"
+            + "平台的任务规划和对话会经过 PersonalLLMGateway；PSL 的 Goal Model、资源检查、失败归因、受控动作、检查结论、追溯和评审落库，以及证据型问答，都是规则、数据库和工具链共同组成的闭环。"
         )
     if intent == "psl_explanation":
         return (
             "PSL 是 Problem-Solving Loop，也就是问题解决闭环。它负责维护持续目标、拆解可执行步骤、读取项目资源、调用受控动作、"
-            "记录失败归因和证据结果；ADL 则负责把这些动作限制在受控产物、追溯、检查、评审和版本边界内。"
+            "记录失败归因和证据结果；受控动作层负责把这些动作限制在受控产物、追溯、检查、评审和版本边界内。"
         )
     if intent == "autonomous_capability":
         return (
-            "可以，但这里的“自主完成”不是无边界自动乱改。平台会先用 PSL 维护目标和步骤，再通过 ADL 选择受控动作；"
+            "可以，但这里的“自主完成”不是无边界自动乱改。平台会先用 PSL 维护目标和步骤，再通过受控动作层选择动作；"
             "高风险结果只生成候选产物并进入检查与人工评审，不能直接绕过评审写入正式版本。"
         )
     if intent == "review_release":
@@ -643,7 +609,7 @@ def _fake_answer_for_intent(intent: str, prompt: str) -> str:
         return "我会把命中的知识库条目作为过程模板、规则或历史经验引用到本次回答中；若命中为空，需要先导入模板、规范或经验文档。"
     if intent == "code_and_tests":
         return "当前回答会检查代码产物、单元测试结果和质量证据；不能只说生成了代码，必须能回到具体产物和验证记录。"
-    if intent == "gate_quality":
+    if intent == "check_quality":
         return "质量结论必须来自平台的检查记录：当前通过时可以推进复核，未通过时需要按问题修复并重新验证。"
     if intent == "traceability":
         return "当前需求已闭环时，追溯需要至少覆盖需求到设计、代码、测试和证据四类链接；缺任一类都不能宣称闭环完成。"

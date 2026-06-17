@@ -99,7 +99,7 @@ class ProjectContext(BaseModel):
     status: str = ""
     product_domain: str = ""
     code_repository: str = ""
-    aspice_scope: list[str] = Field(default_factory=list)
+    process_scope: list[str] = Field(default_factory=list)
     template_scope: list[str] = Field(default_factory=list)
     knowledge_scope: list[str] = Field(default_factory=list)
     current_release_label: str = ""
@@ -321,9 +321,9 @@ class NotificationPreferenceRequest(BaseModel):
     enabled: bool = True
 
 
-class AspiceConfigRequest(BaseModel):
+class ProcessConfigRequest(BaseModel):
     project_id: int | None = None
-    aspice_version: str = "4.0"
+    process_version: str = "1.0"
     process_scope: list[str] = Field(default_factory=list)
     capability_level_target: int = 2
     tailoring_rules: dict[str, Any] = Field(default_factory=dict)
@@ -358,7 +358,7 @@ class ChangeImpactRequest(BaseModel):
     source_ref: str = ""
 
 
-class AspiceExportRequest(BaseModel):
+class ProcessExportRequest(BaseModel):
     project_id: int | None = None
     requirement_id: str | None = None
 

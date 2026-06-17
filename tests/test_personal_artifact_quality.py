@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from personal_agent.artifact_quality import validate_generated_artifact
+from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS
 
 
 def test_functional_spec_rejects_implementation_details() -> None:
@@ -64,7 +65,7 @@ def test_forbidden_personal_language_fails_quality() -> None:
     result = validate_generated_artifact(
         document_type="requirement_analysis_report",
         content_format="markdown",
-        content="# 需求分析\n\n包含 " + "AS" + "PICE" + " 旧词。\n\n## 证据引用\n- source: current_prompt",
+        content=f"# 需求分析\n\n包含 {FORBIDDEN_PERSONAL_TERMS[0]} 旧词。\n\n## 证据引用\n- source: current_prompt",
         context=_context(),
         skill=_skill("requirement_analysis_report"),
         llm_result=_llm(),

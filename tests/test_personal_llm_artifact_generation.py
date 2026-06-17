@@ -6,13 +6,14 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS
 from personal_agent.core import llm_gateway as llm_gateway_module
 from personal_agent.core.database import connect
 from personal_agent.app import create_personal_app
 
 
 LLMResult = getattr(llm_gateway_module, "LLMResult")
-LLMBridge = getattr(llm_gateway_module, "PersonalLLM" + "Ga" + "teway")
+LLMBridge = getattr(llm_gateway_module, "PersonalLLMGateway")
 LLMError = getattr(llm_gateway_module, "PersonalLLM" + "Error")
 
 
@@ -118,7 +119,7 @@ def test_forbidden_generated_content_fails_before_draft_is_saved(tmp_path: Path,
             parsed={
                 "title": "坏内容",
                 "content_format": "markdown",
-                "content": "# 坏内容\n\n这里包含 " + "AS" + "PICE" + " 旧流程词。\n\n## 证据引用\n- source: current_prompt\n",
+                "content": f"# 坏内容\n\n这里包含 {FORBIDDEN_PERSONAL_TERMS[0]} 旧流程词。\n\n## 证据引用\n- source: current_prompt\n",
             },
             raw_text="{}",
         )
@@ -173,7 +174,7 @@ def test_missing_required_sections_returns_quality_failed_draft(tmp_path: Path, 
     assert candidate is not None
     assert candidate["target_skill"] == "functional-spec"
     assert candidate["status"] == "candidate"
-    assert candidate["source"] == "quality_gate_failure"
+    assert candidate["source"] == "quality_check_failure"
 
 
 def test_unresolved_template_placeholder_returns_quality_failed_draft(tmp_path: Path, monkeypatch) -> None:

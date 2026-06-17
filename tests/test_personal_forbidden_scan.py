@@ -15,6 +15,7 @@ def test_personal_agent_surface_has_no_retired_process_language() -> None:
         root / "personal_agent" / "artifact_generation.py",
         root / "personal_agent" / "artifact_drafts.py",
         root / "personal_agent" / "skill_registry.py",
+        root / "personal_agent" / "core",
         root / "frontend" / "src" / "personal",
         root / "tests" / "test_personal_agent_api.py",
         root / "tests" / "test_personal_intent_router.py",

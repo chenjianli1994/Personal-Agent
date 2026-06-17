@@ -272,7 +272,7 @@ def _write_candidate_patch_artifact(db_path: Path, request: ChangeRequest, patch
 
 
 def _knowledge_rules(db_path: Path, project_id: int, request: ChangeRequest) -> list[dict[str, Any]]:
-    query = " ".join([request.change_text, request.target_symbol, "SWE.3 C code patch rule"])
+    query = " ".join([request.change_text, request.target_symbol, "C code patch rule"])
     rules = search_knowledge(db_path, query, project_id=project_id, limit=5)
     return [
         {

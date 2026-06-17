@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from personal_agent.content_guard import personal_forbidden_hits
+from personal_agent.content_guard import RETIRED_PROJECT_INPUT_KEYS, personal_forbidden_hits
 from personal_agent.core.collaboration import ensure_collaboration_seed
 from personal_agent.core.database import connect, init_db
 from personal_agent.core.services_min import bootstrap_knowledge, create_project
@@ -132,9 +132,9 @@ def _cleanup_legacy_records(db_path: Path, project_id: int) -> None:
         conn.execute(
             """
             DELETE FROM project_inputs
-            WHERE project_id=? AND input_key IN ('code_repo_path', 'template_library_path', 'knowledge_library_path', 'quality_' || 'gate_profile')
+            WHERE project_id=? AND input_key IN (?, ?, ?, ?)
             """,
-            (project_id,),
+            (project_id, *RETIRED_PROJECT_INPUT_KEYS),
         )
         polluted_item_ids = [
             int(row["id"])
