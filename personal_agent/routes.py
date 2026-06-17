@@ -148,6 +148,7 @@ class PersonalPatchProposeRequest(BaseModel):
 
 class PersonalPatchTextRequest(BaseModel):
     patch_text: str = ""
+    draft_uid: str = ""
     artifact_id: int | None = None
 
 
@@ -948,7 +949,11 @@ def register_personal_agent_routes(
     @app.post("/api/personal/patch/validate")
     def personal_patch_validate(req: PersonalPatchTextRequest) -> dict[str, Any]:
         _require_capability(context, "patch_candidate")
-        return _invoke_personal_tool(context, "patch_validate", {"patch_text": req.patch_text, "artifact_id": req.artifact_id})
+        return _invoke_personal_tool(
+            context,
+            "patch_validate",
+            {"patch_text": req.patch_text, "draft_uid": req.draft_uid, "artifact_id": req.artifact_id},
+        )
 
     @app.post("/api/personal/patch/apply")
     def personal_patch_apply(req: PersonalPatchApplyRequest) -> dict[str, Any]:
@@ -958,6 +963,7 @@ def register_personal_agent_routes(
             "patch_apply",
             {
                 "patch_text": req.patch_text,
+                "draft_uid": req.draft_uid,
                 "artifact_id": req.artifact_id,
                 "dry_run": req.dry_run,
                 "reviewer": req.reviewer,

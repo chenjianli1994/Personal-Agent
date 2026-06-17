@@ -146,9 +146,25 @@ def _patch_text(db_path: Path, project_id: int, payload: dict[str, Any]) -> str:
     text = str(payload.get("patch_text") or "")
     if text.strip():
         return text
+    draft_uid = str(payload.get("draft_uid") or "").strip()
+    if draft_uid:
+        with connect(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT r.content
+                FROM personal_drafts d
+                JOIN personal_draft_revisions r
+                  ON r.draft_uid=d.draft_uid AND r.revision_index=d.current_revision
+                WHERE d.project_id=? AND d.draft_uid=? AND d.document_type='c_code_diff'
+                """,
+                (project_id, draft_uid),
+            ).fetchone()
+        if not row:
+            raise ValueError("candidate patch draft was not found")
+        return str(row["content"] or "")
     artifact_id = int(payload.get("artifact_id") or 0)
     if artifact_id <= 0:
-        raise ValueError("patch_text or artifact_id is required")
+        raise ValueError("patch_text, draft_uid, or artifact_id is required")
     with connect(db_path) as conn:
         row = conn.execute(
             """

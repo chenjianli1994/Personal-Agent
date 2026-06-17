@@ -8,7 +8,7 @@ from uuid import uuid4
 from ..code_style import ensure_code_style_profile, evaluate_patch_style
 from ..database import connect
 from ..knowledge_base import search_knowledge
-from ..utils import content_type_for, json_dumps, sha256_file, utc_now
+from ..utils import json_dumps, utc_now
 from .impact_analyzer import analyze_codebase_impact
 from .index_store import resolve_repo_path
 from .retriever import symbol_lookup
@@ -59,10 +59,10 @@ def propose_patch(db_path: Path, project_id: int, payload: dict[str, Any]) -> di
         "knowledge_rules": knowledge_rules,
         "integration_contract": {
             "candidate_artifact_type": "c_code_diff",
-            "consumer": "code_integration.plan_code_integration",
+            "consumer": "personal_drafts",
             "real_project_write": False,
             "candidate_artifact_written": not dry_run,
-            "apply_policy": "candidate diff only; verification, review, approval, and apply remain in code_integration.py",
+            "apply_policy": "candidate diff only; verification, review, approval, and apply remain explicit personal actions",
         },
         "risk_boundary": "write_candidate_only",
         "limitations": _unique(
@@ -74,7 +74,7 @@ def propose_patch(db_path: Path, project_id: int, payload: dict[str, Any]) -> di
         ),
         "evidence_refs": {
             **plan.evidence_refs,
-            "artifact_ids": [] if dry_run else [artifact["artifact_id"]],
+            "draft_uids": [] if dry_run else [artifact["draft_uid"]],
             "artifact_files": [] if dry_run else [artifact["file_path"]],
         },
     }
@@ -187,51 +187,66 @@ def _candidate_diff(repo: Path, request: ChangeRequest) -> str:
 
 def _write_candidate_patch_artifact(db_path: Path, request: ChangeRequest, patch_text: str, plan: PatchPlan) -> dict[str, Any]:
     now = utc_now()
-    artifact_uid = "patch_propose_" + now.replace("-", "").replace(":", "").replace("T", "_").replace("Z", "") + "_" + uuid4().hex[:8]
-    out_dir = (db_path.parent / "agent_runs" / artifact_uid).resolve()
+    draft_uid = "draft_" + now.replace("-", "").replace(":", "").replace("T", "_").replace("Z", "") + "_" + uuid4().hex[:8]
+    revision_uid = "rev_" + uuid4().hex[:16]
+    out_dir = (db_path.parent / "agent_runs" / draft_uid).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     patch_path = out_dir / "candidate.patch"
     plan_path = out_dir / "patch_plan.json"
     patch_path.write_text(patch_text, encoding="utf-8")
     plan_path.write_text(json_dumps(_plan_payload(plan)), encoding="utf-8")
+    metadata = {
+        "generation": {
+            "phase": "phase5_code_patch_linkage",
+            "generator": "patch_propose",
+            "patch_propose": {
+                "plan_uid": plan.plan_uid,
+                "change_request": _request_payload(request),
+                "patch_plan": _plan_payload(plan),
+                "file_path": str(patch_path),
+                "plan_path": str(plan_path),
+            },
+            "boundaries": {
+                "personal_draft_only": True,
+                "writes_release_record": False,
+                "writes_real_code": False,
+                "uses_patch_propose": True,
+                "requires_confirmed_apply": True,
+            },
+        }
+    }
     with connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO artifacts(project_id, requirement_id, artifact_type, name, status, process_area_code, source_agent_run_id, created_at, updated_at)
-            VALUES (?, ?, 'c_code_diff', ?, 'candidate', 'SWE.3', ?, ?, ?)
-            ON CONFLICT(project_id, source_agent_run_id, name) DO UPDATE SET updated_at=excluded.updated_at
+            UPDATE personal_drafts SET is_active=0 WHERE project_id=?
             """,
-            (request.project_id, request.requirement_id, "patch_propose_candidate.diff", artifact_uid, now, now),
-        )
-        artifact_id = int(
-            conn.execute(
-                "SELECT id FROM artifacts WHERE project_id=? AND source_agent_run_id=? AND name=?",
-                (request.project_id, artifact_uid, "patch_propose_candidate.diff"),
-            ).fetchone()["id"]
+            (request.project_id,),
         )
         conn.execute(
             """
-            INSERT INTO artifact_files(artifact_id, file_name, source_name, file_path, content_type, sha256, purpose, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(artifact_id, file_name) DO UPDATE SET file_path=excluded.file_path, sha256=excluded.sha256, purpose=excluded.purpose
+            INSERT INTO personal_drafts(
+                draft_uid, project_id, source_uid, document_type, title, content_format,
+                current_revision, status, is_active, metadata_json, created_at, updated_at
+            )
+            VALUES (?, ?, '', 'c_code_diff', ?, 'diff', 1, 'active', 1, ?, ?, ?)
             """,
             (
-                artifact_id,
-                patch_path.name,
-                patch_path.name,
-                str(patch_path),
-                content_type_for(patch_path),
-                sha256_file(patch_path),
-                "candidate patch generated by patch_propose",
+                draft_uid,
+                request.project_id,
+                "Personal Code Patch Candidate",
+                json_dumps(metadata),
+                now,
                 now,
             ),
         )
         conn.execute(
             """
-            INSERT OR IGNORE INTO trace_links(project_id, requirement_id, link_type, target_ref, source_agent_run_id, created_at)
-            VALUES (?, ?, 'code', ?, ?, ?)
+            INSERT INTO personal_draft_revisions(
+                revision_uid, draft_uid, project_id, revision_index, content, metadata_json, created_at
+            )
+            VALUES (?, ?, ?, 1, ?, ?, ?)
             """,
-            (request.project_id, request.requirement_id, "patch_propose_candidate.diff", artifact_uid, now),
+            (revision_uid, draft_uid, request.project_id, patch_text, json_dumps(metadata), now),
         )
         conn.execute(
             """
@@ -240,18 +255,19 @@ def _write_candidate_patch_artifact(db_path: Path, request: ChangeRequest, patch
             """,
             (
                 request.project_id,
-                f"Generated candidate patch for {request.requirement_id}",
-                json_dumps({"artifact_id": artifact_id, "plan_uid": plan.plan_uid, "modified_files": plan.modified_files}),
+                f"Generated personal draft patch for {request.requirement_id}",
+                json_dumps({"draft_uid": draft_uid, "plan_uid": plan.plan_uid, "modified_files": plan.modified_files, "patch_file": str(patch_path)}),
                 now,
             ),
         )
     return {
-        "artifact_id": artifact_id,
-        "artifact_uid": artifact_uid,
-        "name": "patch_propose_candidate.diff",
+        "draft_uid": draft_uid,
+        "name": "Personal Code Patch Candidate",
         "file_path": str(patch_path),
         "plan_path": str(plan_path),
-        "status": "candidate",
+        "status": "active",
+        "document_type": "c_code_diff",
+        "artifact_type": "c_code_diff",
     }
 
 
