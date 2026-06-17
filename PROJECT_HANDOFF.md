@@ -1,290 +1,130 @@
-# PersonalAgent 项目交接文档
+# PersonalAgent 项目交接
 
-本文档用于在新对话中快速让协作者理解 `E:\codex_pro\PersonalAgent` 当前状态、运行方式、关键模块与注意事项。
+本文档用于让新会话快速接手 `E:\codex_pro\PersonalAgent`。优先读本文，再读 `AGENTS.md`、`README.md` 和关键入口文件。
 
-## 1. 项目是什么
+## 当前状态
 
-`PersonalAgent` 是一个已经从 `AspiceAgent` 独立拆分出来的单用户本地智能助手项目。
+- 项目定位：单用户、本地优先的 PersonalAgent，不再按旧平台子模块理解。
+- 后端：`personal_agent/`，FastAPI 应用与 CLI。
+- 前端：`frontend/`，React + Vite。
+- 数据库：本地 SQLite，默认 `.personal_agent/agent.db`，该目录是运行态，不提交。
+- LLM：统一经 `personal_agent/core/llm_gateway.py`；测试默认使用 fake provider。
+- 最近验收：`pytest -q` 为 `65 passed`，`npm run typecheck` 通过。
+- GitHub 远端：`origin` -> `https://github.com/chenjianli1994/Personal-Agent.git`。
+- 本地常见未跟踪文件：`.env`；本地配置不提交。
 
-当前项目形态：
+## 快速启动
 
-- 后端：`personal_agent/`，基于 FastAPI
-- 前端：`frontend/`，基于 React + Vite
-- 数据库：本地 SQLite，默认位于 `.personal_agent/agent.db`
-- 运行模式：支持真实 LLM，也支持 `--fake-llm` 做离线冒烟和测试
-
-这个仓库现在应当按“独立项目”理解，不再依赖 `AspiceAgent` 里的 `aspice_platform` 包。
-
-## 2. 当前迁移状态
-
-截至 2026-06-17，当前仓库内和本项目直接相关的拆分工作已经完成：
-
-- `personal_agent/**` 不再 import `aspice_platform`
-- LLM 网关已改为 personal-only 命名和环境变量
-- 已有独立 `init_db`，能自行初始化数据库
-- personal draft、knowledge、codebase、learning、tool audit 等核心链路可独立运行
-- 前端已独立 build 通过
-- fake-llm 服务冒烟通过
-- 测试通过：`60 passed`
-
-Git 里最近两个关键提交：
-
-1. `6350982` `完成个人Agent独立数据库裁剪与LLM平台残留清理`
-2. `0a5a9f5` `完成个人Agent尾项收尾并通过前后端最终验收`
-
-远端仓库：
-
-- [chenjianli1994/Personal-Agent](https://github.com/chenjianli1994/Personal-Agent)
-
-## 3. 当前目录结构
-
-```text
-E:\codex_pro\PersonalAgent
-├─ personal_agent/          # 后端主代码
-├─ frontend/                # 前端代码
-├─ tests/                   # personal 项目测试集
-├─ .venv/                   # 当前仓库自己的 Python 虚拟环境
-├─ .personal_agent/         # 本地运行时数据目录
-├─ pyproject.toml           # Python 包与入口定义
-├─ README.md
-└─ PROJECT_HANDOFF.md       # 本文档
-```
-
-## 4. 关键入口
-
-### 4.1 后端应用入口
-
-- 应用工厂：`personal_agent/app.py`
-- CLI：`personal_agent/cli.py`
-- 运行时总控：`personal_agent/runtime.py`
-- 路由注册：`personal_agent/routes.py`
-
-最关键的调用链：
-
-`cli.py` -> `app.py` -> `bootstrap.py` -> `routes.py` -> `runtime.py` / feature modules -> `personal_agent/core/**`
-
-### 4.2 数据库入口
-
-- 数据库初始化：`personal_agent/core/database.py`
-- 启动时初始化位置：`personal_agent/bootstrap.py`
-
-`init_db(db_path)` 现在是独立项目自己的 DB 初始化入口。
-
-### 4.3 LLM 入口
-
-- 网关：`personal_agent/core/llm_gateway.py`
-- 管理配置：`personal_agent/core/llm_admin.py`
-- fake provider：`personal_agent/core/fake_llm_provider.py`
-
-核心环境变量前缀统一为：
-
-- `PERSONAL_AGENT_LLM_PROVIDER`
-- `PERSONAL_AGENT_LLM_MODEL`
-- 以及各 provider 对应 API key
-
-### 4.4 前端入口
-
-- 前端主入口：`frontend/src/main.tsx`
-- 应用入口：`frontend/src/App.tsx`
-- personal UI：`frontend/src/personal/PersonalAgentApp.tsx`
-
-## 5. 现在怎么启动
-
-### 5.1 后端安装
-
-在仓库根目录执行：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e .[dev]
-```
-
-如果 `.venv` 不存在，可先创建：
+后端安装与测试：
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -U pip
 .\.venv\Scripts\python.exe -m pip install -e .[dev]
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-### 5.2 后端运行
-
-推荐离线冒烟命令：
+后端离线冒烟：
 
 ```powershell
 .\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870 --fake-llm
 ```
 
-服务关键接口：
-
-- `GET /api/personal/context`
-- `POST /api/personal/chat/turn`
-- `POST /api/personal/artifacts/propose`
-- `POST /api/personal/patch/propose`
-
-### 5.3 前端运行
+前端：
 
 ```powershell
 cd frontend
 npm install
 npm run dev
+npm run typecheck
 ```
 
-默认开发地址：
+前端开发地址通常是 `http://127.0.0.1:5173`。
 
-- [http://127.0.0.1:5173](http://127.0.0.1:5173)
+## 核心入口
 
-### 5.4 前端构建
+- 应用工厂：[personal_agent/app.py](E:\codex_pro\PersonalAgent\personal_agent\app.py)
+- CLI：[personal_agent/cli.py](E:\codex_pro\PersonalAgent\personal_agent\cli.py)
+- 路由：[personal_agent/routes.py](E:\codex_pro\PersonalAgent\personal_agent\routes.py)
+- 会话运行时：[personal_agent/runtime.py](E:\codex_pro\PersonalAgent\personal_agent\runtime.py)
+- 启动初始化：[personal_agent/bootstrap.py](E:\codex_pro\PersonalAgent\personal_agent\bootstrap.py)
+- 数据库 schema：[personal_agent/core/database.py](E:\codex_pro\PersonalAgent\personal_agent\core\database.py)
+- LLM 网关：[personal_agent/core/llm_gateway.py](E:\codex_pro\PersonalAgent\personal_agent\core\llm_gateway.py)
+- fake provider：[personal_agent/core/fake_llm_provider.py](E:\codex_pro\PersonalAgent\personal_agent\core\fake_llm_provider.py)
+- 禁用词护栏：[personal_agent/content_guard.py](E:\codex_pro\PersonalAgent\personal_agent\content_guard.py)
+- 前端主界面：[frontend/src/personal/PersonalAgentApp.tsx](E:\codex_pro\PersonalAgent\frontend\src\personal\PersonalAgentApp.tsx)
 
-```powershell
-cd frontend
-npm run build
+典型后端调用链：
+
+```text
+cli.py -> app.py -> bootstrap.py -> routes.py -> runtime.py -> feature modules -> personal_agent/core/**
 ```
 
-## 6. 当前验证基线
+## 关键模块
 
-### 6.1 测试
+- 对话与意图：`runtime.py`、`intent_router.py`、`policy_guard.py`、`context_builder.py`
+- 草稿与质量检查：`artifact_generation.py`、`artifact_drafts.py`、`artifact_export.py`、`artifact_quality.py`
+- 输入材料：`input_documents.py`、`source_semantic_model.py`
+- 知识与学习：`knowledge_learning.py`、`learning_reflector.py`、`skill_reflector.py`、`skill_runtime.py`、`skill_registry.py`
+- 代码库能力：`personal_agent/core/codebase/`、`personal_agent/core/tool_registry.py`
+- 协作与角色 seed：`personal_agent/core/collaboration.py`
+
+## 近期整改结果
+
+已经完成旧流程残留清理与回归护栏：
+
+- tracked 的旧样例/种子目录已移除。
+- 默认 project inputs 只保留 `personal_test_command`。
+- `content_guard.py` 是禁用词和退休输入键的唯一来源。
+- 知识导入、bootstrap 清理和扫描测试都复用同一套护栏。
+- 扫描测试覆盖 `personal_agent/core/`，避免核心代码再次成为盲区。
+- fake provider 已删除旧死分支，并清理无效乱码触发词和软残留文案。
+- `collaboration.py` 保留模块和 bootstrap 调用，只做术语与权限名收敛。
+
+## 工程约束
+
+- 不提交 `.personal_agent/`、`.env`、`.venv/`、`frontend/node_modules/`、`frontend/dist/` 等运行态或本地文件。
+- 不要重新引入旧平台依赖或旧流程词汇。需要判断某个词是否可用时，先看 `personal_agent/content_guard.py`。
+- 不要在业务代码、测试或文档里手写禁用词清单。测试需要污染样例时，从 `FORBIDDEN_PERSONAL_TERMS` 取值。
+- `PersonalLLMGateway` 是安全标识，`content_guard` 的边界规则不会误伤它。
+- 用户可见文本默认中文；代码标识符和注释优先英文，遵守既有风格。
+- 数据库 schema 统一维护在 `personal_agent/core/database.py`，迁移兼容逻辑走该文件里的 helper。
+- 代码 patch 能力默认只产出 personal candidate draft；实际应用或运行验证必须走显式确认和能力开关。
+
+## 验收命令
+
+日常变更至少跑：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
-```
-
-当前基线结果：
-
-- `60 passed`
-
-说明：
-
-- `tests/conftest.py` 会自动注入 `PERSONAL_AGENT_LLM_PROVIDER=fake`
-- 因此默认测试不依赖外部 LLM 服务
-
-### 6.2 服务冒烟
-
-已验证以下命令可通过：
-
-```powershell
-.\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870 --fake-llm
-```
-
-并确认：
-
-- `GET /api/personal/context` 返回 `200`
-
-### 6.3 前端构建
-
-已验证：
-
-```powershell
 cd frontend
-npm run build
+npm run typecheck
 ```
 
-当前结果：构建成功。  
-存在 Vite chunk size warning，但不阻塞构建。
+涉及文案、知识导入、bootstrap、fake provider 或 core 模块时，额外确认：
 
-## 7. 关键设计约束
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_personal_forbidden_scan.py -q
+```
 
-后续协作时请默认遵守下面这些约束：
+如果需要人工禁用词审计，使用 `personal_forbidden_hits()`，不要另写一套规则。
 
-1. `personal_agent/**` 不应重新引入 `aspice_platform` 依赖
-2. 用户可见文案默认使用中文
-3. personal draft 与正式发布记录要继续保持边界，不要把个人草稿路径重新做成平台发布链路
-4. `patch_propose` 当前默认语义是 personal candidate draft，不应无意回退成平台 `artifacts` 默认写入
-5. 数据库变更优先在 `personal_agent/core/database.py` 统一维护，不要在业务代码里散落 schema 假设
+## 新会话接手提示
 
-## 8. 重要模块速览
-
-### 8.1 对话与意图
-
-- `personal_agent/runtime.py`
-- `personal_agent/intent_router.py`
-- `personal_agent/policy_guard.py`
-- `personal_agent/context_builder.py`
-
-职责：
-
-- 组织会话上下文
-- 做 personal 意图路由
-- 控制是否允许生成草稿、修订、代码 patch、学习反馈
-
-### 8.2 草稿与产物
-
-- `personal_agent/artifact_generation.py`
-- `personal_agent/artifact_drafts.py`
-- `personal_agent/artifact_export.py`
-- `personal_agent/artifact_quality.py`
-
-职责：
-
-- 生成 personal 文档草稿
-- 管理草稿 revision
-- 导出 md/docx/xlsx/diff
-- 质量门检查
-
-### 8.3 知识与学习
-
-- `personal_agent/knowledge_learning.py`
-- `personal_agent/learning_reflector.py`
-- `personal_agent/skill_reflector.py`
-- `personal_agent/skill_runtime.py`
-- `personal_agent/skill_registry.py`
-
-职责：
-
-- 从输入材料和会话中形成知识/候选记忆
-- 形成技能更新候选
-- 在会话内暂时遵循候选规则，明确批准后再沉淀为长期规则
-
-### 8.4 代码库能力
-
-- `personal_agent/core/codebase/`
-- `personal_agent/core/tool_registry.py`
-
-职责：
-
-- 建索引、符号检索、影响分析
-- patch propose / validate / apply
-- build / test / static analysis 的白名单执行
-
-## 9. 新对话建议直接带上的上下文
-
-如果以后在新对话里继续这个项目，建议直接把下面这段发给协作者：
+可直接把下面这段给新协作者：
 
 ```text
 项目路径：E:\codex_pro\PersonalAgent
 
-这是一个已从 AspiceAgent 独立拆出的 PersonalAgent 项目。
-当前状态：
-- personal_agent/** 已无 aspice_platform import
-- 独立 DB / 独立前端 / 独立打包入口已完成
-- 当前仓库自带 .venv，可直接运行
-- pytest 基线为 60 passed
-- fake-llm 冒烟命令：
-  .\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870 --fake-llm
-
-请先阅读：
-1. PROJECT_HANDOFF.md
-2. README.md
-3. personal_agent/app.py
-4. personal_agent/runtime.py
-5. personal_agent/routes.py
-6. personal_agent/core/database.py
-
-除非我明确要求，否则不要把 aspice_platform 依赖重新引回这个仓库。
+这是一个本地 PersonalAgent 项目，后端在 personal_agent/，前端在 frontend/。
+请先读 PROJECT_HANDOFF.md、AGENTS.md、README.md。
+当前验证状态：pytest -q 为 65 passed，frontend 下 npm run typecheck 通过。
+运行态目录和本地配置不提交。
+旧流程禁用词和退休输入键只以 personal_agent/content_guard.py 为准；不要在业务代码、测试或文档里重新手写清单。
 ```
 
-## 10. 当前已知非阻塞事项
+## 已知非阻塞事项
 
-1. 前端 build 存在 chunk size warning
-   - 不影响当前交付
-   - 后续可考虑做按路由或按模块拆包
-
-2. 测试运行时会看到 `fastapi.testclient` 的 deprecation warning
-   - 当前不阻塞
-   - 后续升级依赖时可以统一处理
-
-3. 仓库根目录当前可能存在本地未跟踪文件 `CLAUDE.md`
-   - 先确认它是否属于项目协作说明，再决定是否纳入版本控制
-
-## 11. 一句话结论
-
-这是一个已经完成独立拆分并经过后端测试、前端构建、fake-llm 冒烟验证的本地 PersonalAgent 项目；新对话接手时，应把它当成独立仓库继续演进，而不是 `AspiceAgent` 的子模块。
+- `pytest` 会出现 `fastapi.testclient` 的 deprecation warning，不阻塞当前工作。
+- 前端构建可能出现 chunk size warning，不影响 typecheck。
+- `.env` 是本地配置，保持未跟踪。

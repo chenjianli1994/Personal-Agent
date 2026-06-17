@@ -1,6 +1,12 @@
 # PersonalAgent
 
-独立 personal agent 项目。
+单用户、本地优先的 PersonalAgent 项目。后端使用 FastAPI，前端使用 React + Vite，数据默认写入本地 SQLite。
+
+新会话接手请先读：
+
+- `PROJECT_HANDOFF.md`
+- `AGENTS.md`
+- `CLAUDE.md`
 
 ## 后端
 
@@ -23,3 +29,16 @@ npm install
 npm run build
 npm run typecheck
 ```
+
+## 验证状态
+
+当前结果：
+
+- `.\.venv\Scripts\python.exe -m pytest -q` -> `65 passed`
+- `frontend` 下 `npm run typecheck` 通过
+
+## 文档与边界
+
+- `personal_agent/content_guard.py` 是旧流程禁用词与退休输入键的唯一来源。
+- 不提交 `.personal_agent/`、`.env`、`.venv/`、`frontend/node_modules/`、`frontend/dist/`。
+- 运行态数据默认位于 `.personal_agent/agent.db`。
