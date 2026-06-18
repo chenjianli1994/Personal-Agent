@@ -30,6 +30,7 @@ from .artifact_generation import (
 )
 from .artifact_export import export_personal_artifact, resolve_personal_artifact_download
 from .bootstrap import PersonalAgentContext
+from .document_intent import document_type_from_text, looks_like_document_generation
 from .runtime import PersonalRuntime, PersonalRuntimeError
 from .input_documents import (
     activate_input_source,
@@ -323,8 +324,8 @@ def register_personal_agent_routes(
         message_metadata = message.get("metadata") or {}
         learning = message_metadata.get("learning_reflection") or {}
         draft = message_metadata.get("draft") or {}
-        if not draft and _looks_like_document_generation(req.content):
-            document_type = _document_type_from_text(req.content)
+        if not draft and looks_like_document_generation(req.content):
+            document_type = document_type_from_text(req.content)
             fallback_source_uids = req.source_uids or [str(item) for item in (session.get("active_source_uid") and [session.get("active_source_uid")] or [])]
             if document_type == "unit_test_code_or_diff":
                 draft = propose_personal_unit_test_code(
@@ -1087,25 +1088,3 @@ def _model_to_dict(model: Any) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
-
-
-def _looks_like_document_generation(text: str) -> bool:
-    compact = "".join(str(text or "").split()).lower()
-    return any(token in compact for token in ["生成", "写一份", "输出", "创建"]) and any(
-        token in compact for token in ["报告", "文档", "需求分析", "需求拆解", "功能规范", "详细设计", "测试用例", "单元测试代码", "测试代码"]
-    )
-
-
-def _document_type_from_text(text: str) -> str:
-    compact = "".join(str(text or "").split()).lower()
-    if "需求拆解" in compact:
-        return "requirement_breakdown"
-    if "功能规范" in compact:
-        return "functional_spec"
-    if "详细设计" in compact:
-        return "detailed_design"
-    if "测试用例" in compact:
-        return "test_case_spec"
-    if "单元测试代码" in compact or "测试代码" in compact:
-        return "unit_test_code_or_diff"
-    return "requirement_analysis_report"

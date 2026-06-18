@@ -10,6 +10,7 @@ from personal_agent.bootstrap import bootstrap_personal_agent
 from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS, RETIRED_PROJECT_INPUT_KEYS
 from personal_agent.core.database import connect
 from personal_agent.app import create_personal_app
+from personal_agent.document_intent import document_type_from_text, looks_like_document_generation
 
 
 LLMResult = getattr(llm_gateway_module, "LLMResult")
@@ -285,6 +286,71 @@ def test_personal_document_generation_uses_llm_route_and_skill_generation(tmp_pa
     assert "personal_intent_route" in purposes
     assert "personal_artifact_generate" in purposes
     assert draft_count == 1
+
+
+def test_document_intent_helper_matches_chat_and_unified_turn_document_types() -> None:
+    assert looks_like_document_generation("生成详细设计文档") is True
+    assert document_type_from_text("生成详细设计文档") == "detailed_design"
+    assert document_type_from_text("输出单元测试代码") == "unit_test_code_or_diff"
+    assert looks_like_document_generation("普通问题：详细说明一下") is False
+
+
+def test_chat_and_unified_turn_document_generation_are_equivalent(tmp_path: Path, monkeypatch) -> None:
+    client, _db_path, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+
+    chat = client.post("/api/personal/chat/turn", json={"content": "生成详细设计文档"})
+    unified = client.post("/api/agent/unified-turn", json={"content": "生成详细设计文档"})
+
+    assert chat.status_code == 200, chat.json()
+    assert unified.status_code == 200, unified.json()
+    chat_message = chat.json()["message"]
+    unified_payload = unified.json()
+    assert chat_message["metadata"]["intent_route"]["intent"] == "generate_document"
+    assert chat_message["metadata"]["draft"]["document_type"] == "detailed_design"
+    assert unified_payload["mode"] == "personal_phase4_artifact"
+    assert unified_payload["metadata"]["personal_intent"]["intent"] == "generate_document"
+    assert unified_payload["message"]["metadata"]["draft"]["document_type"] == "detailed_design"
+    assert unified_payload["metadata"]["personal_intent"]["created_draft_uids"] == [
+        unified_payload["message"]["metadata"]["draft"]["draft_uid"]
+    ]
+
+
+def test_personal_chat_runtime_split_keeps_response_shape(tmp_path: Path, monkeypatch) -> None:
+    client, _db_path, _ = _client(tmp_path, monkeypatch)
+
+    answer = client.post("/api/personal/chat/turn", json={"content": "普通问题：你能做什么？"})
+
+    assert answer.status_code == 200, answer.json()
+    payload = answer.json()
+    assert set(payload) == {"session", "message"}
+    assert payload["session"]["session_uid"] == payload["message"]["session_uid"]
+    assert payload["message"]["metadata"]["intent_route"]["intent"] == "answer_only"
+
+
+def test_recall_feedback_failure_logs_warning_without_interrupting_response(tmp_path: Path, monkeypatch, caplog) -> None:
+    client, _db_path, _ = _client(tmp_path, monkeypatch)
+    created = client.post(
+        "/api/personal/learning/feedback",
+        json={"feedback": "以后回答 AlphaWarning 时先说明这是测试记忆。"},
+    )
+    assert created.status_code == 200
+    approved = client.post(
+        f"/api/personal/learning/candidates/{created.json()['id']}/approve",
+        json={"reviewer": "tester", "comment": "warning log test"},
+    )
+    assert approved.status_code == 200
+
+    def fail_feedback(*args: Any, **kwargs: Any) -> None:
+        raise ValueError("synthetic recall feedback failure")
+
+    monkeypatch.setattr("personal_agent.runtime.record_recall_feedback", fail_feedback)
+    caplog.set_level("WARNING", logger="personal_agent.runtime")
+
+    answer = client.post("/api/personal/chat/turn", json={"content": "普通问题：AlphaWarning 现在怎么答？"})
+
+    assert answer.status_code == 200, answer.json()
+    assert "synthetic recall feedback failure" in caplog.text
 
 
 def test_chat_document_quality_failure_returns_failed_draft_and_skill_candidate(tmp_path: Path, monkeypatch) -> None:

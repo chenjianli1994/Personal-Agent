@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any
@@ -25,6 +26,9 @@ from .skill_update_candidates import (
     list_skill_update_candidates,
     record_skill_update_candidate_review,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class PersonalRuntimeError(RuntimeError):
@@ -98,13 +102,29 @@ class PersonalRuntime:
         return {"status": "deleted", "session_uid": session_uid}
 
     def turn(self, *, content: str, session_uid: str = "", source_uids: list[str] | None = None) -> dict[str, Any]:
+        prompt, source_uids = self._normalize_turn_input(content=content, source_uids=source_uids)
+        session_uid = self._start_turn_session(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
+        context, route, skill_reflection, reflection = self._prepare_turn_context(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
+        message = self._dispatch_prepared_turn(
+            session_uid=session_uid,
+            prompt=prompt,
+            context=context,
+            route=route,
+            skill_reflection=skill_reflection,
+            reflection=reflection,
+        )
+        return self._finish_turn(session_uid=session_uid, prompt=prompt, message=message)
+
+    def _normalize_turn_input(self, *, content: str, source_uids: list[str] | None) -> tuple[str, list[str]]:
         prompt = content.strip()
         if not prompt:
             raise PersonalRuntimeError("content is required")
         source_uids = list(dict.fromkeys(uid.strip() for uid in (source_uids or []) if uid.strip()))
         if len(source_uids) > 5:
             raise PersonalRuntimeError("at most 5 input files can be attached to one message")
+        return prompt, source_uids
 
+    def _start_turn_session(self, *, session_uid: str, prompt: str, source_uids: list[str]) -> str:
         session = self._ensure_session(session_uid, prompt)
         session_uid = session["session_uid"]
         attachments: list[dict[str, Any]] = []
@@ -112,17 +132,37 @@ class PersonalRuntime:
             attachments = _attachment_metadata(activate_input_sources(self.db_path, project_id=self.project_id, source_uids=source_uids))
         user_metadata = {"attachments": attachments} if attachments else {}
         self._append_message(session_uid, "user", prompt, user_metadata, utc_now())
+        return session_uid
 
+    def _prepare_turn_context(
+        self,
+        *,
+        session_uid: str,
+        prompt: str,
+        source_uids: list[str],
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None]:
         context = self.context_builder.build(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
         route = apply_personal_policy(self.intent_router.route(context), context)
         skill_reflection = self.skill_reflector.reflect({**context, "prompt": prompt, "session_uid": session_uid})
         if skill_reflection.get("approval_intent") in {"approve_latest", "reject_latest"}:
-            message = self._review_latest_skill_candidate_turn(session_uid=session_uid, prompt=prompt, reflection=skill_reflection, route=route)
-            refreshed_context = self.context_builder.build(session_uid=session_uid, prompt=prompt)
-            self._touch_session(session_uid, refreshed_context)
-            return {"session": self.get_session(session_uid), "message": message}
+            return context, route, skill_reflection, None
         reflection = self.learning_reflector.reflect(context) if should_run_learning_reflector(context, route) else _skipped_learning_reflection(context)
         self._record_previous_memory_unhelpful_if_correction(session_uid, reflection)
+        return context, route, skill_reflection, reflection
+
+    def _dispatch_prepared_turn(
+        self,
+        *,
+        session_uid: str,
+        prompt: str,
+        context: dict[str, Any],
+        route: dict[str, Any],
+        skill_reflection: dict[str, Any],
+        reflection: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if skill_reflection.get("approval_intent") in {"approve_latest", "reject_latest"}:
+            return self._review_latest_skill_candidate_turn(session_uid=session_uid, prompt=prompt, reflection=skill_reflection, route=route)
+        reflection = reflection or _skipped_learning_reflection(context)
         if reflection.get("approval_intent") in {"approve_latest", "reject_latest"}:
             message = self._review_latest_learning_turn(session_uid=session_uid, prompt=prompt, reflection=reflection, route=route)
         else:
@@ -134,7 +174,9 @@ class PersonalRuntime:
             skill_candidate = self._create_skill_candidate_if_needed(session_uid=session_uid, reflection=skill_reflection)
             if skill_candidate:
                 message = self._annotate_skill_reflection(message, skill_reflection, skill_candidate)
+        return message
 
+    def _finish_turn(self, *, session_uid: str, prompt: str, message: dict[str, Any]) -> dict[str, Any]:
         refreshed_context = self.context_builder.build(session_uid=session_uid, prompt=prompt)
         self._touch_session(session_uid, refreshed_context)
         return {"session": self.get_session(session_uid), "message": message}
@@ -515,7 +557,8 @@ class PersonalRuntime:
         for item_uid in dict.fromkeys(uid for uid in item_uids if uid):
             try:
                 record_recall_feedback(self.db_path, item_uid=item_uid, event="use")
-            except ValueError:
+            except ValueError as exc:
+                logger.warning("recall feedback use failed for item_uid=%s: %s", item_uid, exc)
                 continue
 
     def _record_previous_memory_unhelpful_if_correction(self, session_uid: str, reflection: dict[str, Any]) -> None:
@@ -546,7 +589,8 @@ class PersonalRuntime:
         for item_uid in dict.fromkeys(correction_uids):
             try:
                 record_recall_feedback(self.db_path, item_uid=item_uid, event="unhelpful")
-            except ValueError:
+            except ValueError as exc:
+                logger.warning("recall feedback unhelpful failed for item_uid=%s: %s", item_uid, exc)
                 continue
 
     def _touch_session(self, session_uid: str, context: dict[str, Any]) -> None:
