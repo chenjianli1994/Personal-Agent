@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .file_text import CODE_FILE_RELEVANCE_CHARS, read_code_text
 from .index_store import (
     build_and_store_index,
     latest_repository,
@@ -359,7 +360,7 @@ def _relevant_files(db_path: Path, repository_id: int, files: list[dict[str, Any
     repo_root = str(row["root_path"]) if row else ""
     ranked = []
     for item in files:
-        text = _read_indexed_file(repo_root, item["path"])
+        text = _indexed_source_text(repo_root, item)
         relevance = _score_relevance(item["path"], text, query_terms)
         file_id = int(item["id"])
         ranked.append(
@@ -443,7 +444,7 @@ def _terms(text: str) -> set[str]:
 def _score_relevance(rel: str, text: str, query_terms: set[str]) -> float:
     if not query_terms:
         return 0.1 if "test" not in rel.lower() else 0.05
-    haystack = f"{rel}\n{text[:10000]}".lower()
+    haystack = f"{rel}\n{text[:CODE_FILE_RELEVANCE_CHARS]}".lower()
     hits = sum(1 for term in query_terms if term.lower() in haystack)
     return round(hits / max(len(query_terms), 1), 4)
 
@@ -454,13 +455,29 @@ def _read_indexed_file(repo_root: str, rel_path: str) -> str:
     path = Path(repo_root) / rel_path
     if not path.exists() or not path.is_file():
         return ""
-    data = path.read_bytes()
-    for encoding in ("utf-8", "utf-8-sig", "gb18030", "gbk", "latin-1"):
-        try:
-            return data.decode(encoding, errors="ignore")
-        except Exception:
-            continue
-    return data.decode("utf-8", errors="replace")
+    return read_code_text(path)
+
+
+def _indexed_source_text(repo_root: str, file_row: dict[str, Any]) -> str:
+    preview = str(file_row.get("source_preview") or "")
+    if preview and _preview_is_current(repo_root, file_row):
+        return preview
+    return _read_indexed_file(repo_root, str(file_row.get("path") or ""))
+
+
+def _preview_is_current(repo_root: str, file_row: dict[str, Any]) -> bool:
+    if not repo_root:
+        return False
+    path = Path(repo_root) / str(file_row.get("path") or "")
+    if not path.exists() or not path.is_file():
+        return False
+    return _last_modified(path) == str(file_row.get("last_modified") or "")
+
+
+def _last_modified(path: Path) -> str:
+    from datetime import datetime
+
+    return datetime.utcfromtimestamp(path.stat().st_mtime).replace(microsecond=0).isoformat() + "Z"
 
 
 def _files_containing_type(db_path: Path, repository_id: int, files: list[dict[str, Any]], type_name: str, limit: int) -> list[str]:
@@ -471,7 +488,7 @@ def _files_containing_type(db_path: Path, repository_id: int, files: list[dict[s
     repo_root = str(row["root_path"]) if row else ""
     result = []
     for item in files:
-        text = _read_indexed_file(repo_root, item["path"])
+        text = _indexed_source_text(repo_root, item)
         if re.search(rf"\b{re.escape(type_name)}\b", text):
             result.append(item["path"])
         if len(result) >= limit:

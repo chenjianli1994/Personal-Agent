@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .file_text import read_code_text
 from .schemas import CODE_EXTENSIONS, SKIP_DIRS, TEST_HINTS, ScannedCodeFile
 
 
@@ -32,7 +33,7 @@ def scan_code_repository(repo_path: Path, *, max_files: int = 160, skip_dirs: li
         if len(files) >= max_files:
             skipped_after_limit += 1
             continue
-        text = _safe_read(path)
+        text = read_code_text(path)
         if not text.strip():
             continue
         stat = path.stat()
@@ -78,16 +79,6 @@ def _is_skipped(root: Path, path: Path, skip_dirs: set[str]) -> bool:
         parts = [part.replace("\\", "/") for part in path.parts]
     rel = "/".join(parts)
     return any(part in skip_dirs for part in parts) or any(rel == item or rel.startswith(f"{item}/") for item in skip_dirs if "/" in item)
-
-
-def _safe_read(path: Path) -> str:
-    data = path.read_bytes()
-    for encoding in ("utf-8", "utf-8-sig", "gb18030", "gbk", "latin-1"):
-        try:
-            return data.decode(encoding, errors="ignore")
-        except Exception:
-            continue
-    return data.decode("utf-8", errors="replace")
 
 
 def _sha256_bytes(data: bytes) -> str:

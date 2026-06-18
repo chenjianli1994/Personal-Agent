@@ -5,7 +5,9 @@ import sys
 
 from fastapi.testclient import TestClient
 
-from personal_agent.core.database import connect
+from personal_agent.core.database import connect, init_db
+from personal_agent.core.codebase.file_text import CODE_FILE_RELEVANCE_CHARS, read_code_text
+from personal_agent.core.codebase.retriever import _files_containing_type
 from personal_agent.app import create_personal_app
 
 
@@ -135,6 +137,78 @@ int DiagnosticSpeed_Check(void)
     assert files["speed.c"]["dependency_count"] == 1
     assert files["diagnostic.c"]["symbol_count"] >= 1
     assert files["diagnostic.c"]["dependency_count"] == 1
+
+
+def test_code_files_source_preview_schema_migrates_existing_db(tmp_path: Path) -> None:
+    db_path = tmp_path / "agent.db"
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(code_files)").fetchall()}
+
+    assert "source_preview" in columns
+
+
+def test_codebase_index_backfills_empty_source_preview_on_unchanged_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client, db_path, _repo, _test_command = _client_with_code_repo(tmp_path)
+    with connect(db_path) as conn:
+        conn.execute("UPDATE code_files SET source_preview=''")
+        before = conn.execute("SELECT COUNT(*) FROM code_files WHERE source_preview=''").fetchone()[0]
+    assert before > 0
+
+    indexed = client.post("/api/personal/codebase/index", json={"query": "VehicleSpeed_Read", "max_files": 20})
+
+    assert indexed.status_code == 200
+    assert indexed.json()["output"]["index_run"]["changed_file_count"] > 0
+    with connect(db_path) as conn:
+        after = conn.execute("SELECT COUNT(*) FROM code_files WHERE source_preview=''").fetchone()[0]
+    assert after == 0
+
+
+def test_codebase_index_writes_ten_kb_source_preview_and_shared_decode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo = tmp_path / "preview_repo"
+    repo.mkdir()
+    long_text = "int AlphaPreview(void) { return 1; }\n" + ("/* filler */\n" * 1200)
+    (repo / "alpha.c").write_text(long_text, encoding="utf-8")
+    gbk_text = "typedef int 中文速度类型;\nint ReadChineseSpeed(void) { return 0; }\n"
+    (repo / "gbk.c").write_bytes(gbk_text.encode("gbk"))
+    client = TestClient(create_personal_app(db_path, workspace))
+    saved = client.put("/api/personal/codebase/config", json={"repo_path": str(repo)})
+    assert saved.status_code == 200
+
+    indexed = client.post("/api/personal/codebase/index", json={"query": "AlphaPreview 中文速度类型", "max_files": 20})
+
+    assert indexed.status_code == 200
+    with connect(db_path) as conn:
+        rows = {row["path"]: dict(row) for row in conn.execute("SELECT * FROM code_files").fetchall()}
+    assert len(rows["alpha.c"]["source_preview"]) == CODE_FILE_RELEVANCE_CHARS
+    assert rows["alpha.c"]["source_preview"] == read_code_text(repo / "alpha.c")[:CODE_FILE_RELEVANCE_CHARS]
+    assert rows["gbk.c"]["source_preview"] == read_code_text(repo / "gbk.c")[:CODE_FILE_RELEVANCE_CHARS]
+
+
+def test_codebase_search_uses_preview_fallback_without_writing_db(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client, db_path, repo, _test_command = _client_with_code_repo(tmp_path)
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM code_files WHERE path='speed.c'").fetchone()
+        original_preview = row["source_preview"]
+        repo_id = int(row["repository_id"])
+    (repo / "speed.c").write_text((repo / "speed.c").read_text(encoding="utf-8") + "\ntypedef int PhaseTwoFallbackType;\n", encoding="utf-8")
+
+    search = client.post("/api/personal/codebase/search", json={"query": "PhaseTwoFallbackType", "limit": 5})
+
+    assert search.status_code == 200
+    assert any(item["path"] == "speed.c" for item in search.json()["output"]["file_results"])
+    with connect(db_path) as conn:
+        after = conn.execute("SELECT source_preview FROM code_files WHERE path='speed.c'").fetchone()["source_preview"]
+        files = [dict(item) for item in conn.execute("SELECT * FROM code_files WHERE repository_id=?", (repo_id,)).fetchall()]
+    assert after == original_preview
+    assert "speed.c" in _files_containing_type(db_path, repo_id, files, "PhaseTwoFallbackType", 5)
 
 
 def _client_with_code_repo(tmp_path: Path) -> tuple[TestClient, Path, Path, str]:

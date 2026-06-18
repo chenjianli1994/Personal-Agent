@@ -411,6 +411,7 @@ CREATE TABLE IF NOT EXISTS code_files (
     file_type TEXT NOT NULL DEFAULT '',
     hash TEXT NOT NULL DEFAULT '',
     line_count INTEGER NOT NULL DEFAULT 0,
+    source_preview TEXT NOT NULL DEFAULT '',
     last_modified TEXT NOT NULL DEFAULT '',
     last_indexed_at TEXT NOT NULL DEFAULT '',
     parser TEXT NOT NULL DEFAULT 'regex',
@@ -914,6 +915,13 @@ def _ensure_compat_columns(conn: sqlite3.Connection) -> None:
             "prompt_version_id": "TEXT NOT NULL DEFAULT ''",
             "policy_version_id": "TEXT NOT NULL DEFAULT ''",
             "contract_version_id": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _add_columns(
+        conn,
+        "code_files",
+        {
+            "source_preview": "TEXT NOT NULL DEFAULT ''",
         },
     )
     skill_columns = {row["name"] for row in conn.execute("PRAGMA table_info(personal_skills)").fetchall()}

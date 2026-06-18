@@ -7,6 +7,7 @@ from typing import Any
 from ..database import connect
 from ..utils import json_dumps, utc_now
 from .c_parser import parse_code_file
+from .file_text import source_preview
 from .scanner import scan_code_repository
 from .schemas import (
     ParsedCallEdge,
@@ -73,7 +74,13 @@ def build_and_store_index(
         file_ids: dict[str, int] = {}
         for file in scan["files"]:
             previous = previous_files.get(file.rel_path)
-            if previous and previous["hash"] == file.hash and previous["last_modified"] == file.last_modified and _has_parser_metadata(previous):
+            if (
+                previous
+                and previous["hash"] == file.hash
+                and previous["last_modified"] == file.last_modified
+                and _has_parser_metadata(previous)
+                and str(previous.get("source_preview") or "").strip()
+            ):
                 file_ids[file.rel_path] = int(previous["id"])
                 reused_file_count += 1
                 parser_names.append(str(previous.get("parser") or "regex"))
@@ -410,10 +417,25 @@ def _repository_totals(conn, repo_id: int) -> dict[str, int]:
 def _insert_file(conn, repo_id: int, file: ScannedCodeFile, parsed: ParsedCodeFile, now: str) -> int:
     conn.execute(
         """
-        INSERT INTO code_files(repository_id, path, language, file_type, hash, line_count, last_modified, last_indexed_at, parser, parser_confidence)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO code_files(
+            repository_id, path, language, file_type, hash, line_count, source_preview,
+            last_modified, last_indexed_at, parser, parser_confidence
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (repo_id, file.rel_path, file.language, file.file_type, file.hash, file.line_count, file.last_modified, now, parsed.parser, parsed.parser_confidence),
+        (
+            repo_id,
+            file.rel_path,
+            file.language,
+            file.file_type,
+            file.hash,
+            file.line_count,
+            source_preview(file.text),
+            file.last_modified,
+            now,
+            parsed.parser,
+            parsed.parser_confidence,
+        ),
     )
     return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
@@ -422,10 +444,22 @@ def _update_file(conn, repo_id: int, file_id: int, file: ScannedCodeFile, parsed
     conn.execute(
         """
         UPDATE code_files
-        SET language=?, file_type=?, hash=?, line_count=?, last_modified=?, last_indexed_at=?, parser=?, parser_confidence=?
+        SET language=?, file_type=?, hash=?, line_count=?, source_preview=?, last_modified=?, last_indexed_at=?, parser=?, parser_confidence=?
         WHERE id=? AND repository_id=?
         """,
-        (file.language, file.file_type, file.hash, file.line_count, file.last_modified, now, parsed.parser, parsed.parser_confidence, file_id, repo_id),
+        (
+            file.language,
+            file.file_type,
+            file.hash,
+            file.line_count,
+            source_preview(file.text),
+            file.last_modified,
+            now,
+            parsed.parser,
+            parsed.parser_confidence,
+            file_id,
+            repo_id,
+        ),
     )
     return file_id
 
