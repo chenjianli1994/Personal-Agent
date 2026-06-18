@@ -1481,7 +1481,7 @@ function isUnreadableLearningText(text: string): boolean {
   const value = String(text || "");
   if (!value.trim()) return false;
   const questionMarks = (value.match(/\?/g) || []).length;
-  return questionMarks >= 4 || /�|锛|鐢|瀛|绛|鎴|妯|€/.test(value);
+  return questionMarks >= 4;
 }
 
 function GenerationMetadataSummary({ draft }: { draft: PersonalArtifactDraft }) {

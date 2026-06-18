@@ -695,6 +695,7 @@ def ensure_knowledge_search_index(db_path: Path) -> dict[str, int | bool]:
 
     with connect(db_path) as conn:
         fts_ready = _ensure_search_schema(conn)
+        _backfill_document_item_entry_ids(conn)
         expected = _source_entry_count(conn)
         actual = int(conn.execute("SELECT COUNT(*) FROM knowledge_search_entries").fetchone()[0])
         fts_rows = _fts_row_count(conn) if fts_ready else 0
@@ -747,7 +748,6 @@ def _ensure_search_schema(conn: sqlite3.Connection) -> bool:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_source ON knowledge_search_entries(source_kind, source_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_document ON knowledge_search_entries(document_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_item_uid ON knowledge_search_entries(source_kind, item_uid)")
-    _backfill_document_item_entry_ids(conn)
     try:
         conn.execute(
             """
