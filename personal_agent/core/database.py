@@ -327,6 +327,8 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_source
 ON knowledge_search_entries(source_kind, source_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_document
 ON knowledge_search_entries(document_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_item_uid
+ON knowledge_search_entries(source_kind, item_uid);
 
 CREATE TABLE IF NOT EXISTS knowledge_import_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -919,6 +921,14 @@ def _ensure_compat_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE personal_skills ADD COLUMN document_type TEXT NOT NULL DEFAULT ''")
     if "artifact_type" in skill_columns:
         conn.execute("UPDATE personal_skills SET document_type=artifact_type WHERE document_type=''")
+    _ensure_compat_indexes(conn)
+
+
+def _ensure_compat_indexes(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_item_uid "
+        "ON knowledge_search_entries(source_kind, item_uid)"
+    )
 
 
 def _add_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:

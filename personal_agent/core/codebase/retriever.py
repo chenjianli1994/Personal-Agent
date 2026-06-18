@@ -341,11 +341,27 @@ def _relevant_files(db_path: Path, repository_id: int, files: list[dict[str, Any
 
     with connect(db_path) as conn:
         row = conn.execute("SELECT root_path FROM code_repositories WHERE id=?", (repository_id,)).fetchone()
+        file_ids = [int(item["id"]) for item in files if item.get("id") is not None]
+        symbol_counts = _count_by_file(
+            conn,
+            "code_symbols",
+            "file_id",
+            repository_id=repository_id,
+            file_ids=file_ids,
+        )
+        include_counts = _count_by_file(
+            conn,
+            "code_includes",
+            "source_file_id",
+            repository_id=repository_id,
+            file_ids=file_ids,
+        )
     repo_root = str(row["root_path"]) if row else ""
     ranked = []
     for item in files:
         text = _read_indexed_file(repo_root, item["path"])
         relevance = _score_relevance(item["path"], text, query_terms)
+        file_id = int(item["id"])
         ranked.append(
             (
                 relevance,
@@ -355,8 +371,8 @@ def _relevant_files(db_path: Path, repository_id: int, files: list[dict[str, Any
                     "kind": item["file_type"],
                     "language": item["language"],
                     "line_count": item["line_count"],
-                    "symbol_count": _symbol_count_for_file(db_path, repository_id, int(item["id"])),
-                    "dependency_count": _include_count_for_file(db_path, repository_id, int(item["id"])),
+                    "symbol_count": symbol_counts.get(file_id, 0),
+                    "dependency_count": include_counts.get(file_id, 0),
                     "relevance": relevance,
                     "snippet": _snippet_for_terms(text, query_terms),
                 },
@@ -463,6 +479,22 @@ def _files_containing_type(db_path: Path, repository_id: int, files: list[dict[s
     return result
 
 
+def _count_by_file(conn: Any, table: str, file_column: str, *, repository_id: int, file_ids: list[int]) -> dict[int, int]:
+    if not file_ids:
+        return {}
+    placeholders = ",".join("?" for _ in file_ids)
+    rows = conn.execute(
+        f"""
+        SELECT {file_column} AS file_id, COUNT(*) AS count
+        FROM {table}
+        WHERE repository_id=? AND {file_column} IN ({placeholders})
+        GROUP BY {file_column}
+        """,
+        (repository_id, *file_ids),
+    ).fetchall()
+    return {int(row["file_id"]): int(row["count"]) for row in rows}
+
+
 def _snippet_for_terms(text: str, query_terms: set[str], *, limit: int = 240) -> str:
     lines = text.splitlines()
     if not lines:
@@ -476,20 +508,6 @@ def _snippet_for_terms(text: str, query_terms: set[str], *, limit: int = 240) ->
             end = min(len(lines), index + 3)
             return _trim(" ".join(lines[start:end]), limit)
     return _trim(" ".join(lines[:4]), limit)
-
-
-def _symbol_count_for_file(db_path: Path, repository_id: int, file_id: int) -> int:
-    from ..database import connect
-
-    with connect(db_path) as conn:
-        return int(conn.execute("SELECT COUNT(*) FROM code_symbols WHERE repository_id=? AND file_id=?", (repository_id, file_id)).fetchone()[0])
-
-
-def _include_count_for_file(db_path: Path, repository_id: int, file_id: int) -> int:
-    from ..database import connect
-
-    with connect(db_path) as conn:
-        return int(conn.execute("SELECT COUNT(*) FROM code_includes WHERE repository_id=? AND source_file_id=?", (repository_id, file_id)).fetchone()[0])
 
 
 def _compact_symbol(item: dict[str, Any]) -> dict[str, Any]:

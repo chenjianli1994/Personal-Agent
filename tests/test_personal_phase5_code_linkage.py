@@ -112,6 +112,31 @@ def test_personal_phase5_unit_test_code_draft_and_validation_allowlist(tmp_path:
     assert "test_exception_or_diagnostic_path" in created["content"]
 
 
+def test_codebase_search_reports_symbol_and_include_counts_for_multiple_files(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client, _db_path, repo, _test_command = _client_with_code_repo(tmp_path)
+    (repo / "diagnostic.c").write_text(
+        """
+#include "speed.h"
+
+int DiagnosticSpeed_Check(void)
+{
+    return VehicleSpeed_Read(1);
+}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    indexed = client.post("/api/personal/codebase/index", json={"query": "VehicleSpeed_Read DiagnosticSpeed", "max_files": 20})
+    assert indexed.status_code == 200
+    files = {item["path"]: item for item in indexed.json()["output"]["relevant_files"]}
+
+    assert files["speed.c"]["symbol_count"] >= 2
+    assert files["speed.c"]["dependency_count"] == 1
+    assert files["diagnostic.c"]["symbol_count"] >= 1
+    assert files["diagnostic.c"]["dependency_count"] == 1
+
+
 def _client_with_code_repo(tmp_path: Path) -> tuple[TestClient, Path, Path, str]:
     db_path = tmp_path / "agent.db"
     workspace = tmp_path / "workspace"

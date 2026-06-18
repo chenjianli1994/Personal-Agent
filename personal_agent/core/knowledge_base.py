@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 from ..content_guard import assert_personal_payload_clean
@@ -24,6 +25,14 @@ MAX_BOOTSTRAP_FILE_BYTES = 256_000
 SEARCH_INDEX_PREVIEW_CHARS = 1200
 SEARCH_INDEX_CANDIDATE_LIMIT = 80
 _SEARCH_INDEX_READY_DBS: set[str] = set()
+
+
+@dataclass(frozen=True)
+class _KnowledgeQuery:
+    raw: str
+    normalized: str
+    terms: list[str]
+    ngrams: set[str]
 
 
 def index_knowledge_directory(db_path: Path, root: Path, project_id: int | None = None) -> dict[str, int]:
@@ -316,7 +325,7 @@ def import_knowledge_document(
             indexed_count = int(conn.execute("SELECT COUNT(*) FROM knowledge_search_entries WHERE document_id=?", (doc_id,)).fetchone()[0])
             if indexed_count < chunk_count:
                 _upsert_document_chunk_search_entries(conn, doc_id)
-                _upsert_item_search_entry(conn, _document_item_uid(str(existing["doc_uid"])))
+                _upsert_item_search_entry(conn, _document_item_uid(str(existing["doc_uid"])), document_id=doc_id)
             payload = dict(existing)
             payload["chunk_count"] = chunk_count
             return _decode_knowledge_document_payload(payload)
@@ -412,7 +421,7 @@ def import_knowledge_document(
             """,
             (project_id, item_uid, title, category, source_type, source_ref, content[:12000], json_dumps(tags + process_codes), doc_status, now, now),
         )
-        _upsert_item_search_entry(conn, item_uid)
+        _upsert_item_search_entry(conn, item_uid, document_id=doc_id)
         _upsert_document_chunk_search_entries(conn, doc_id)
         governance = apply_document_governance(conn, doc_id)
         row = conn.execute("SELECT * FROM knowledge_documents WHERE id=?", (doc_id,)).fetchone()
@@ -466,15 +475,15 @@ def search_knowledge(
     process_code: str | None = None,
     status: str | None = None,
 ) -> list[dict[str, Any]]:
-    normalized_query = _normalize(query)
-    if not normalized_query:
+    query_context = _knowledge_query(query)
+    if not query_context.normalized:
         return []
     allowed_statuses = _search_statuses(status)
     if _search_index_key(db_path) not in _SEARCH_INDEX_READY_DBS:
         ensure_knowledge_search_index(db_path)
     indexed = _search_knowledge_index(
         db_path,
-        query,
+        query_context,
         project_id=project_id,
         limit=limit,
         allowed_statuses=allowed_statuses,
@@ -487,7 +496,7 @@ def search_knowledge(
         return [_standardize_knowledge_result(item) for item in indexed]
     legacy = _search_knowledge_legacy_scan(
         db_path,
-        query,
+        query_context,
         project_id=project_id,
         limit=limit,
         allowed_statuses=allowed_statuses,
@@ -527,7 +536,7 @@ def _canonical_trust_level(value: Any) -> str:
 
 def _search_knowledge_legacy_scan(
     db_path: Path,
-    query: str,
+    query: _KnowledgeQuery,
     project_id: int | None,
     limit: int,
     *,
@@ -561,12 +570,12 @@ def _search_knowledge_legacy_scan(
         if not _matches_filters(payload, tags, allowed_statuses, category, exclude_category, source_type, process_code):
             continue
         text = _normalize(" ".join([payload["title"], payload["category"], payload["source_ref"], payload["content"][:2000]]))
-        score = _lexical_score(normalized_query, text)
+        score = _lexical_score(query.normalized, text, query_terms=query.terms, query_grams=query.ngrams)
         if score <= 0:
             continue
         payload["score"] = round(score, 4)
         payload["tags"] = tags
-        payload["excerpt"] = _excerpt(payload["content"], query)
+        payload["excerpt"] = _excerpt(payload["content"], query.raw, query_terms=query.terms)
         ranked.append(payload)
     with connect(db_path) as conn:
         if project_id:
@@ -598,7 +607,7 @@ def _search_knowledge_legacy_scan(
         if not _matches_filters(payload, tags, allowed_statuses, category, exclude_category, source_type, process_code, process_codes):
             continue
         text = _normalize(" ".join([payload["title"], payload["category"], payload["source_ref"], payload.get("heading", ""), payload["content"][:2500]]))
-        score = _lexical_score(normalized_query, text)
+        score = _lexical_score(query.normalized, text, query_terms=query.terms, query_grams=query.ngrams)
         if score <= 0:
             continue
         ranked.append(
@@ -615,7 +624,7 @@ def _search_knowledge_legacy_scan(
                 "confidence": 0.86,
                 "status": payload["status"],
                 "score": round(score, 4),
-                "excerpt": _excerpt(payload["content"], query),
+                "excerpt": _excerpt(payload["content"], query.raw, query_terms=query.terms),
                 "document_id": payload["document_id"],
                 "chunk_id": payload["id"],
                 "chunk_index": payload["chunk_index"],
@@ -640,7 +649,7 @@ def update_knowledge_document_status(db_path: Path, document_id: int, status: st
             (next_status, now, _document_item_uid(str(row["doc_uid"]))),
         )
         _sync_document_search_status(conn, document_id, next_status, now)
-        _upsert_item_search_entry(conn, _document_item_uid(str(row["doc_uid"])))
+        _upsert_item_search_entry(conn, _document_item_uid(str(row["doc_uid"])), document_id=document_id)
         updated = conn.execute(
             """
             SELECT kd.*, COUNT(kc.id) AS chunk_count
@@ -737,6 +746,8 @@ def _ensure_search_schema(conn: sqlite3.Connection) -> bool:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_project_status ON knowledge_search_entries(project_id, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_source ON knowledge_search_entries(source_kind, source_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_document ON knowledge_search_entries(document_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_item_uid ON knowledge_search_entries(source_kind, item_uid)")
+    _backfill_document_item_entry_ids(conn)
     try:
         conn.execute(
             """
@@ -755,6 +766,19 @@ def _ensure_search_schema(conn: sqlite3.Connection) -> bool:
     except sqlite3.OperationalError:
         return False
     return True
+
+
+def _backfill_document_item_entry_ids(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("SELECT id, doc_uid FROM knowledge_documents").fetchall()
+    for row in rows:
+        conn.execute(
+            """
+            UPDATE knowledge_search_entries
+            SET document_id=?
+            WHERE source_kind='item' AND item_uid=? AND document_id IS NULL
+            """,
+            (int(row["id"]), _document_item_uid(str(row["doc_uid"]))),
+        )
 
 
 def _source_entry_count(conn: sqlite3.Connection) -> int:
@@ -786,11 +810,12 @@ def _rebuild_knowledge_search_index(conn: sqlite3.Connection) -> None:
         _upsert_item_search_entry(conn, str(row["item_uid"]))
     for row in conn.execute("SELECT id FROM knowledge_documents ORDER BY id").fetchall():
         _upsert_document_chunk_search_entries(conn, int(row["id"]))
+    _backfill_document_item_entry_ids(conn)
 
 
 def _search_knowledge_index(
     db_path: Path,
-    query: str,
+    query: _KnowledgeQuery,
     *,
     project_id: int | None,
     limit: int,
@@ -851,7 +876,7 @@ def _materialize_search_result(
     payload: dict[str, Any],
     tags: list[str],
     process_codes: list[str],
-    query: str,
+    query: _KnowledgeQuery,
 ) -> dict[str, Any] | None:
     source_kind = str(payload.get("source_kind") or "")
     source_id = int(payload.get("source_id") or 0)
@@ -862,10 +887,10 @@ def _materialize_search_result(
             return None
         item = dict(row)
         content = str(item.get("content") or "")
-        score = _indexed_score(rank, query, " ".join([str(item.get("title", "")), content[:2500]]))
+        score = _indexed_score(rank, query.raw, " ".join([str(item.get("title", "")), content[:2500]]), query_context=query)
         item["tags"] = _loads_json(item.pop("tags_json", "[]"))
         item["score"] = score
-        item["excerpt"] = _excerpt(content, query)
+        item["excerpt"] = _excerpt(content, query.raw, query_terms=query.terms)
         item["search_mode"] = "indexed"
         doc_payload = _document_for_item_uid(conn, str(item.get("item_uid", "")))
         if doc_payload:
@@ -878,7 +903,7 @@ def _materialize_search_result(
         doc = conn.execute("SELECT * FROM knowledge_documents WHERE id=?", (payload["document_id"],)).fetchone()
         doc_payload = dict(doc) if doc else {}
         content = str(row["content"] or "")
-        score = _indexed_score(rank, query, " ".join([str(payload.get("title", "")), str(payload.get("heading", "")), content[:2500]]))
+        score = _indexed_score(rank, query.raw, " ".join([str(payload.get("title", "")), str(payload.get("heading", "")), content[:2500]]), query_context=query)
         return {
             "id": source_id,
             "item_uid": f"chunk_{source_id}",
@@ -892,7 +917,7 @@ def _materialize_search_result(
             "confidence": 0.86,
             "status": row["status"],
             "score": score,
-            "excerpt": _excerpt(content, query),
+            "excerpt": _excerpt(content, query.raw, query_terms=query.terms),
             "document_id": payload["document_id"],
             "chunk_id": source_id,
             "chunk_index": row["chunk_index"],
@@ -916,7 +941,7 @@ def _materialize_search_result(
     return None
 
 
-def _upsert_item_search_entry(conn: sqlite3.Connection, item_uid: str) -> None:
+def _upsert_item_search_entry(conn: sqlite3.Connection, item_uid: str, document_id: int | None = None) -> None:
     if not _ensure_search_schema(conn):
         return
     row = conn.execute("SELECT * FROM knowledge_items WHERE item_uid=?", (item_uid,)).fetchone()
@@ -928,7 +953,7 @@ def _upsert_item_search_entry(conn: sqlite3.Connection, item_uid: str) -> None:
         conn,
         source_kind="item",
         source_id=int(payload["id"]),
-        document_id=None,
+        document_id=document_id,
         item_uid=str(payload["item_uid"]),
         project_id=payload.get("project_id"),
         title=str(payload["title"]),
@@ -1113,17 +1138,19 @@ def _delete_search_fts_row(conn: sqlite3.Connection, rowid: int) -> None:
         return
 
 
-def _fts_query(query: str) -> str:
+def _fts_query(query: _KnowledgeQuery | str) -> str:
     terms = []
-    for term in _terms(query):
+    query_terms = query.terms if isinstance(query, _KnowledgeQuery) else _terms(query)
+    for term in query_terms:
         cleaned = term.replace('"', '""').strip()
         if cleaned and len(cleaned) <= 80:
             terms.append(f'"{cleaned}"')
     return " OR ".join(dict.fromkeys(terms[:12]))
 
 
-def _indexed_score(rank: float, query: str, text: str) -> float:
-    lexical = _lexical_score(_normalize(query), _normalize(text))
+def _indexed_score(rank: float, query: str, text: str, *, query_context: _KnowledgeQuery | None = None) -> float:
+    context = query_context or _knowledge_query(query)
+    lexical = _lexical_score(context.normalized, _normalize(text), query_terms=context.terms, query_grams=context.ngrams)
     # SQLite FTS5 bm25() uses lower values as better matches and commonly
     # returns negative scores. The magnitude carries the match strength.
     fts_score = abs(rank) / (1.0 + abs(rank))
@@ -1289,13 +1316,19 @@ def _summary(content: str) -> str:
     return content.strip().replace("\n", " ")[:400]
 
 
-def _lexical_score(query: str, text: str) -> float:
-    query_terms = set(_terms(query))
+def _knowledge_query(query: str) -> _KnowledgeQuery:
+    normalized = _normalize(query)
+    terms = _terms(query)
+    return _KnowledgeQuery(raw=query, normalized=normalized, terms=terms, ngrams=_ngrams(normalized))
+
+
+def _lexical_score(query: str, text: str, *, query_terms: list[str] | None = None, query_grams: set[str] | None = None) -> float:
+    query_terms_set = set(query_terms if query_terms is not None else _terms(query))
     text_terms = set(_terms(text))
-    if not query_terms or not text_terms:
+    if not query_terms_set or not text_terms:
         return 0.0
-    term_overlap = len(query_terms & text_terms) / len(query_terms)
-    query_grams = _ngrams(query)
+    term_overlap = len(query_terms_set & text_terms) / len(query_terms_set)
+    query_grams = query_grams if query_grams is not None else _ngrams(query)
     text_grams = _ngrams(text[:4000])
     gram_overlap = len(query_grams & text_grams) / max(1, len(query_grams))
     return term_overlap * 0.72 + gram_overlap * 0.28
@@ -1326,10 +1359,10 @@ def _normalize(text: str) -> str:
     return "".join(text.lower().split())
 
 
-def _excerpt(content: str, query: str) -> str:
+def _excerpt(content: str, query: str, *, query_terms: list[str] | None = None) -> str:
     if not content:
         return ""
-    query_terms = _terms(query)
+    query_terms = query_terms if query_terms is not None else _terms(query)
     lowered = content.lower()
     for term in query_terms:
         index = lowered.find(term.lower())
@@ -1364,11 +1397,20 @@ def _decode_knowledge_document_payload(payload: dict[str, Any]) -> dict[str, Any
 def _document_for_item_uid(conn: sqlite3.Connection, item_uid: str) -> dict[str, Any] | None:
     if not item_uid.startswith("kb_doc_"):
         return None
-    for row in conn.execute("SELECT * FROM knowledge_documents").fetchall():
-        payload = dict(row)
-        if _document_item_uid(str(payload["doc_uid"])) == item_uid:
-            return payload
-    return None
+    entry = conn.execute(
+        """
+        SELECT document_id
+        FROM knowledge_search_entries
+        WHERE source_kind='item' AND item_uid=? AND document_id IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (item_uid,),
+    ).fetchone()
+    if not entry:
+        return None
+    row = conn.execute("SELECT * FROM knowledge_documents WHERE id=?", (int(entry["document_id"]),)).fetchone()
+    return dict(row) if row else None
 
 
 def _governance_search_payload(doc_payload: dict[str, Any]) -> dict[str, Any]:

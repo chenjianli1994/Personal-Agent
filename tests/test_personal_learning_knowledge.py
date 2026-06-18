@@ -5,8 +5,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS
-from personal_agent.core.database import connect
-from personal_agent.core.knowledge_base import import_knowledge_code_directory, import_knowledge_document
+from personal_agent.core.database import connect, init_db
+from personal_agent.core.knowledge_base import ensure_knowledge_search_index, import_knowledge_code_directory, import_knowledge_document, search_knowledge
 from personal_agent.app import create_personal_app
 
 
@@ -45,6 +45,83 @@ def test_personal_knowledge_import_search_and_deprecate_source(tmp_path: Path, m
     )
     assert deprecated.status_code == 200
     assert deprecated.json()["status"] == "deprecated"
+
+
+def test_knowledge_document_item_search_entry_keeps_document_id_and_index(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+    project_id = client.get("/api/personal/context").json()["project_id"]
+
+    doc = import_knowledge_document(
+        db_path,
+        project_id=project_id,
+        title="AlphaDoc Governance",
+        content="AlphaDocUnique approval source evidence.",
+        category="reference",
+        source_ref="docs/alpha.md",
+        tags=["alpha"],
+        doc_uid="doc_alpha_governance",
+    )
+
+    with connect(db_path) as conn:
+        indexes = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(knowledge_search_entries)").fetchall()
+        }
+        item_entry = conn.execute(
+            """
+            SELECT document_id
+            FROM knowledge_search_entries
+            WHERE source_kind='item' AND item_uid LIKE 'kb_doc_%'
+            """
+        ).fetchone()
+    assert "idx_knowledge_search_entries_item_uid" in indexes
+    assert item_entry["document_id"] == doc["id"]
+
+    hits = search_knowledge(db_path, "AlphaDocUnique", project_id=project_id, limit=5)
+    assert any(
+        item.get("document_id") == doc["id"]
+        and item.get("doc_uid") == "doc_alpha_governance"
+        and item.get("approval_status") == "approved"
+        for item in hits
+    )
+
+
+def test_knowledge_search_schema_ensure_backfills_legacy_document_item_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "agent.db"
+    init_db(db_path)
+    doc = import_knowledge_document(
+        db_path,
+        title="Legacy AlphaDoc",
+        content="LegacyAlphaDoc content",
+        category="reference",
+        source_ref="legacy.md",
+        doc_uid="legacy_alpha_doc",
+    )
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE knowledge_search_entries
+            SET document_id=NULL
+            WHERE source_kind='item' AND item_uid LIKE 'kb_doc_%'
+            """
+        )
+        before = conn.execute(
+            "SELECT document_id FROM knowledge_search_entries WHERE source_kind='item' AND item_uid LIKE 'kb_doc_%'"
+        ).fetchone()
+    assert before["document_id"] is None
+
+    result = ensure_knowledge_search_index(db_path)
+
+    assert result["rebuilt"] is False
+    with connect(db_path) as conn:
+        after = conn.execute(
+            "SELECT document_id FROM knowledge_search_entries WHERE source_kind='item' AND item_uid LIKE 'kb_doc_%'"
+        ).fetchone()
+    assert after["document_id"] == doc["id"]
 
 
 def test_manual_knowledge_document_import_rejects_forbidden_terms(tmp_path: Path, monkeypatch) -> None:
