@@ -825,6 +825,8 @@ def test_learning_reflection_gate_skips_chitchat_but_not_material_signals() -> N
     assert learning_reflection_gate({"prompt": "批准这条经验"})["skip"] is False
     assert learning_reflection_gate({"prompt": "生成 Alpha 功能规范"})["skip"] is False
     assert learning_reflection_gate({"prompt": "给这个函数写 patch"})["skip"] is False
+    assert should_run_learning_reflector({"prompt": ""}, {"intent": "answer_only"}) is False
+    assert should_run_learning_reflector({"prompt": "以后都这样回答"}, {"intent": "answer_only"}) is True
     assert should_run_learning_reflector({"prompt": "谢谢"}, {"intent": "answer_only"}) is False
     assert should_run_learning_reflector({"prompt": "谢谢"}, {"intent": "generate_document"}) is True
 

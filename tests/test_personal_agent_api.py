@@ -81,6 +81,34 @@ def test_bootstrap_fresh_workspace_does_not_require_knowledge_directory(tmp_path
         assert inputs == {"personal_test_command": "python -m pytest"}
 
 
+def test_json_responses_preserve_utf8_text(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    title = "中文标题"
+    content = "水泵和风扇需要保留中文内容。"
+
+    response = client.post(
+        "/api/personal/sources/text",
+        json={"title": title, "content": content, "make_active": True},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    raw_text = response.content.decode("utf-8")
+    assert title in raw_text
+    assert "\ufffd" not in raw_text
+    payload = response.json()
+    assert payload["title"] == title
+
+    detail = client.get(f"/api/personal/sources/{payload['source_uid']}")
+    assert detail.status_code == 200, detail.text
+    assert detail.headers["content-type"].startswith("application/json")
+    detail_text = detail.content.decode("utf-8")
+    assert title in detail_text
+    assert content in detail_text
+    assert "\ufffd" not in detail_text
+    assert detail.json()["plain_text"] == content
+
+
 def test_bootstrap_cleans_polluted_db_records(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
     db_path = tmp_path / "agent.db"

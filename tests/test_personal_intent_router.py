@@ -56,3 +56,30 @@ def test_policy_guard_blocks_missing_active_draft_revision(tmp_path: Path, monke
     assert guarded["intent"] == "answer_only"
     assert guarded["policy"]["fallback"] is True
     assert "没有激活草稿" in guarded["policy"]["reason"]
+
+
+def test_policy_guard_blocks_direct_file_writes_and_marks_tool_confirmation() -> None:
+    blocked = apply_personal_policy(
+        {
+            "intent": "answer_only",
+            "confidence": 0.99,
+            "writes_project_files": True,
+            "creates_draft": False,
+        },
+        {"active_source_uids": ["src_1"], "active_draft": {}},
+    )
+    assert blocked["intent"] == "answer_only"
+    assert blocked["policy"]["fallback"] is True
+    assert "禁止" in blocked["policy"]["reason"]
+
+    tool = apply_personal_policy(
+        {
+            "intent": "propose_code_patch",
+            "confidence": 0.99,
+            "writes_project_files": False,
+        },
+        {"active_source_uids": ["src_1"], "active_draft": {}},
+    )
+    assert tool["intent"] == "propose_code_patch"
+    assert tool["requires_user_confirmation"] is True
+    assert tool["policy"]["fallback"] is False
