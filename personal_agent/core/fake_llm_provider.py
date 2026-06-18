@@ -31,6 +31,7 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
             payload = {}
         message = str(payload.get("user_message") or "")
         compact = re.sub(r"\s+", "", message).lower()
+        implicit_events = payload.get("implicit_learning_events") if isinstance(payload.get("implicit_learning_events"), list) else []
         if any(token in compact for token in ["批准这个skill修改", "批准这个skill更新", "记住这个生成方式"]):
             return {"has_skill_update_signal": False, "approval_intent": "approve_latest", "confidence": 0.93}
         if any(token in compact for token in ["驳回刚才那个skill更新", "不要改这个skill", "驳回这个skill修改"]):
@@ -82,6 +83,52 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
         ]
         has_signal = any(token in compact for token in signal_terms)
         if not has_signal:
+            if implicit_events:
+                event_types = {str(item.get("type") or "") for item in implicit_events if isinstance(item, dict)}
+                if "explicit_correction" in event_types:
+                    return {
+                        "has_learning_signal": True,
+                        "confidence": 0.9,
+                        "feedback_type": "correction",
+                        "scope": "project",
+                        "candidate_lesson": "用户明确纠错时，应先修正意图理解，再继续处理任务",
+                        "anti_behavior": "不要沿着已被纠正的错误理解继续回答",
+                        "approval_intent": "none",
+                        "reason": "结构化事件显示用户明确纠错。",
+                    }
+                if "draft_quality_failure" in event_types:
+                    return {
+                        "has_learning_signal": True,
+                        "confidence": 0.82,
+                        "feedback_type": "quality_bar",
+                        "scope": "project",
+                        "candidate_lesson": "文档草稿质量门失败后，应优先沉淀可复用的质量约束并在后续同类生成中提前校验",
+                        "anti_behavior": "不要忽略质量门失败信号继续按原策略生成",
+                        "approval_intent": "none",
+                        "reason": "结构化事件显示草稿质量失败。",
+                    }
+                if "repeated_draft_revision" in event_types:
+                    return {
+                        "has_learning_signal": True,
+                        "confidence": 0.8,
+                        "feedback_type": "workflow_preference",
+                        "scope": "project",
+                        "candidate_lesson": "同一草稿被连续修订时，应抽象修订方向为后续同类草稿的生成偏好",
+                        "anti_behavior": "不要只机械应用单次修订而忽略重复反馈趋势",
+                        "approval_intent": "none",
+                        "reason": "结构化事件显示同一草稿连续修订。",
+                    }
+                if "repeated_fallback" in event_types:
+                    return {
+                        "has_learning_signal": True,
+                        "confidence": 0.76,
+                        "feedback_type": "workflow_preference",
+                        "scope": "project",
+                        "candidate_lesson": "连续 fallback 后，应在后续同类任务中更早说明限制并引导用户补齐可恢复条件",
+                        "anti_behavior": "不要重复给出无进展的 fallback 回复",
+                        "approval_intent": "none",
+                        "reason": "结构化事件显示连续 fallback。",
+                    }
             return {
                 "has_learning_signal": False,
                 "confidence": 0.18,

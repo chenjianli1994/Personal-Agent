@@ -121,7 +121,7 @@ class PersonalRuntime:
             refreshed_context = self.context_builder.build(session_uid=session_uid, prompt=prompt)
             self._touch_session(session_uid, refreshed_context)
             return {"session": self.get_session(session_uid), "message": message}
-        reflection = self.learning_reflector.reflect(context)
+        reflection = self.learning_reflector.reflect(context) if should_run_learning_reflector(context, route) else _skipped_learning_reflection(context)
         self._record_previous_memory_unhelpful_if_correction(session_uid, reflection)
         if reflection.get("approval_intent") in {"approve_latest", "reject_latest"}:
             message = self._review_latest_learning_turn(session_uid=session_uid, prompt=prompt, reflection=reflection, route=route)
@@ -633,6 +633,74 @@ def _valid_used_uids(value: Any, allowed_uids: list[str]) -> list[str]:
         if uid in allowed and uid not in result:
             result.append(uid)
     return result
+
+
+def should_run_learning_reflector(context: dict[str, Any], route: dict[str, Any]) -> bool:
+    intent = str(route.get("intent") or "")
+    if intent in {"generate_document", "revise_draft", "propose_code_patch", "run_validation", "learn_feedback", "analyze_input_source"}:
+        return True
+    prompt = str(context.get("prompt") or "").strip()
+    compact = "".join(prompt.lower().split())
+    if not compact:
+        return False
+    if _has_explicit_learning_signal(compact):
+        return True
+    if _is_low_value_chat(compact):
+        return False
+    return True
+
+
+def _has_explicit_learning_signal(compact: str) -> bool:
+    signal_terms = (
+        "以后",
+        "下次",
+        "不要固定模板",
+        "按这种方式回答",
+        "你理解错了",
+        "刚才这样更好",
+        "这个修改是对的",
+        "以后都这样",
+        "下次不要这样",
+        "批准这条经验",
+        "驳回刚才那条",
+        "记住刚才那条",
+    )
+    return any(term in compact for term in signal_terms)
+
+
+def _is_low_value_chat(compact: str) -> bool:
+    if not compact:
+        return True
+    confirmations = {"好", "好的", "可以", "行", "嗯", "嗯嗯", "ok", "okay", "收到", "明白", "了解", "是的", "对", "没问题"}
+    thanks = {"谢谢", "感谢", "辛苦了", "thanks", "thankyou", "thx"}
+    greetings = {"你好", "hi", "hello", "早", "早上好", "晚上好"}
+    if compact in confirmations | thanks | greetings:
+        return True
+    if len(compact) <= 8 and any(term in compact for term in confirmations | thanks | greetings):
+        return True
+    return False
+
+
+def _skipped_learning_reflection(context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "has_learning_signal": False,
+        "confidence": 0.0,
+        "feedback_type": "none",
+        "scope": "project",
+        "candidate_lesson": "",
+        "anti_behavior": "",
+        "approval_intent": "none",
+        "reason": "learning_reflector_skipped",
+        "skip_reason": "runtime_gate",
+        "implicit_learning_events": [],
+        "llm": {
+            "call_id": None,
+            "provider": "",
+            "model": "",
+            "status": "skipped",
+            "purpose": "personal_learning_reflect",
+        },
+    }
 
 
 def _attachment_metadata(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:

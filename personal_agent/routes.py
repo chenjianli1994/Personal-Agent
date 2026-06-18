@@ -51,6 +51,7 @@ from .knowledge_learning import (
     reject_personal_candidate,
     search_personal_knowledge,
 )
+from .knowledge_recall import consolidate_memory_lessons
 from .skill_registry import (
     evaluate_personal_skill,
     get_personal_skill,
@@ -770,6 +771,11 @@ def register_personal_agent_routes(
             )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/personal/memory/consolidate")
+    def personal_memory_consolidate() -> dict[str, Any]:
+        _require_capability(context, "knowledge_learning")
+        return consolidate_memory_lessons(context.db_path, project_id=context.project_id)
 
     @app.get("/api/personal/learning/summary")
     def personal_learning_summary_route() -> dict[str, Any]:

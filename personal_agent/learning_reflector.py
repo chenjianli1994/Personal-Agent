@@ -26,6 +26,12 @@ class PersonalLearningReflector:
         self.project_id = project_id
 
     def reflect(self, context: dict[str, Any], *, task_uid: str = "") -> dict[str, Any]:
+        gate = learning_reflection_gate(context)
+        if gate["skip"]:
+            reflection = _empty_reflection()
+            reflection["skip_reason"] = gate["reason"]
+            reflection["implicit_learning_events"] = gate["implicit_learning_events"]
+            return reflection
         gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         system_prompt = "\n".join(
             [
@@ -53,6 +59,7 @@ class PersonalLearningReflector:
                     }
                     for item in (context.get("sources") or [])[:3]
                 ],
+                "implicit_learning_events": gate["implicit_learning_events"],
                 "required_json_schema": {
                     "has_learning_signal": False,
                     "confidence": 0.0,
@@ -76,6 +83,8 @@ class PersonalLearningReflector:
         except getattr(llm_gateway_module, "PersonalLLM" + "Error") as exc:
             return _empty_reflection(error=str(exc))
         reflection = _coerce_reflection(result.parsed)
+        reflection["skip_reason"] = ""
+        reflection["implicit_learning_events"] = gate["implicit_learning_events"]
         reflection["llm"] = {
             "call_id": result.call_id,
             "provider": result.provider,
@@ -84,6 +93,86 @@ class PersonalLearningReflector:
             "purpose": "personal_learning_reflect",
         }
         return reflection
+
+
+def learning_reflection_gate(context: dict[str, Any]) -> dict[str, Any]:
+    prompt = str(context.get("prompt") or "").strip()
+    compact = _compact(prompt)
+    events = implicit_learning_events(context)
+    if _has_non_skippable_signal(compact, context, events):
+        return {"skip": False, "reason": "non_skippable_signal", "implicit_learning_events": events}
+    if _is_low_value_chat(compact):
+        return {"skip": True, "reason": "low_value_chat", "implicit_learning_events": events}
+    return {"skip": False, "reason": "substantive_turn", "implicit_learning_events": events}
+
+
+def implicit_learning_events(context: dict[str, Any]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    prompt = str(context.get("prompt") or "")
+    compact = _compact(prompt)
+    if _looks_like_correction(compact):
+        events.append({"type": "explicit_correction", "confidence": 0.95})
+
+    recent_messages = context.get("recent_messages") if isinstance(context.get("recent_messages"), list) else []
+    fallback_count = 0
+    draft_revision_count = 0
+    quality_failure_count = 0
+    active_draft_uid = str((context.get("active_draft") or {}).get("draft_uid") or "") if isinstance(context.get("active_draft"), dict) else ""
+    for message in recent_messages[-8:]:
+        metadata = message.get("metadata") if isinstance(message, dict) else {}
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("fallback"):
+            fallback_count += 1
+        draft = metadata.get("draft") if isinstance(metadata.get("draft"), dict) else {}
+        draft_uid = str(draft.get("draft_uid") or "")
+        if active_draft_uid and draft_uid == active_draft_uid and str(metadata.get("context") or "") == "draft_revision":
+            draft_revision_count += 1
+        generation = draft.get("generation") if isinstance(draft.get("generation"), dict) else {}
+        if generation.get("quality_gate_passed") is False:
+            quality_failure_count += 1
+    if fallback_count >= 2:
+        events.append({"type": "repeated_fallback", "count": fallback_count, "confidence": 0.75})
+    if draft_revision_count >= 2:
+        events.append({"type": "repeated_draft_revision", "draft_uid": active_draft_uid, "count": draft_revision_count, "confidence": 0.8})
+    if quality_failure_count:
+        events.append({"type": "draft_quality_failure", "count": quality_failure_count, "confidence": 0.85})
+    return events
+
+
+def _has_non_skippable_signal(compact: str, context: dict[str, Any], events: list[dict[str, Any]]) -> bool:
+    if events:
+        return True
+    approval_terms = ("批准", "同意", "驳回", "拒绝", "不要记", "别记", "approve", "reject")
+    correction_terms = ("错", "不对", "误解", "理解错", "纠正", "修正")
+    document_terms = ("生成", "草稿", "需求", "功能规范", "详细设计", "测试用例", "文档")
+    code_terms = ("代码", "patch", "diff", "测试", "运行", "函数", "文件", "commit")
+    if any(term in compact for term in approval_terms + correction_terms + document_terms + code_terms):
+        return True
+    route = context.get("intent_route") if isinstance(context.get("intent_route"), dict) else {}
+    intent = str(route.get("intent") or "")
+    return intent in {"generate_document", "revise_draft", "propose_code_patch", "run_validation", "learn_feedback"}
+
+
+def _is_low_value_chat(compact: str) -> bool:
+    if not compact:
+        return True
+    confirmations = {"好", "好的", "可以", "行", "嗯", "嗯嗯", "ok", "okay", "收到", "明白", "了解", "是的", "对", "没问题"}
+    thanks = {"谢谢", "感谢", "辛苦了", "thanks", "thankyou", "thx"}
+    greetings = {"你好", "hi", "hello", "早", "早上好", "晚上好"}
+    if compact in confirmations | thanks | greetings:
+        return True
+    if len(compact) <= 8 and any(term in compact for term in confirmations | thanks | greetings):
+        return True
+    return False
+
+
+def _looks_like_correction(compact: str) -> bool:
+    return any(term in compact for term in ("你理解错", "理解错", "不对", "错了", "不是这个意思", "纠正", "应该是"))
+
+
+def _compact(text: str) -> str:
+    return "".join(str(text or "").lower().split())
 
 
 def _coerce_reflection(parsed: dict[str, Any]) -> dict[str, Any]:

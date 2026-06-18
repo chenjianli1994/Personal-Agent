@@ -12,7 +12,9 @@ from personal_agent.core import llm_gateway as llm_gateway_module
 from personal_agent.core.database import connect, init_db
 from personal_agent.core.knowledge_base import index_knowledge_item_search_entry, search_knowledge
 from personal_agent.core.services_min import approve_memory_candidate
-from personal_agent.knowledge_recall import recall_knowledge, recall_rank_components, record_recall_feedback, safe_recall_prompt_item, _recall_rank
+from personal_agent.knowledge_recall import consolidate_memory_lessons, recall_knowledge, recall_rank_components, record_recall_feedback, safe_recall_prompt_item, _recall_rank
+from personal_agent.learning_reflector import learning_reflection_gate
+from personal_agent.runtime import should_run_learning_reflector
 
 
 LLMResult = getattr(llm_gateway_module, "LLMResult")
@@ -662,3 +664,207 @@ def test_forbidden_legacy_memory_is_not_injected_or_counted(tmp_path: Path, monk
     stats = _item_stats(db_path, "kb_memory_polluted")
     assert stats["use_count"] == 0
     assert stats["helpful_count"] == 0
+
+
+def test_query_expansion_recalls_memory_from_partial_cjk_terms(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    project_id = _project_id(client)
+    candidate_id = _create_candidate(client, "以后处理 AlphaHybrid 检索质量时先说明确定性召回依据")
+    _approve_candidate(client, candidate_id)
+    item_uid = f"kb_memory_{candidate_id}"
+
+    recalled = recall_knowledge(db_path, project_id=project_id, query="检索质量", category="memory_lesson")
+
+    assert [item["item_uid"] for item in recalled] == [item_uid]
+    assert recalled[0]["score"] > 0
+
+
+def test_consolidation_soft_marks_duplicate_conflict_and_low_utility_without_deleting(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    project_id = _project_id(client)
+    now = "2026-01-01T00:00:00Z"
+    rows = [
+        ("kb_memory_consolidate_keep", "AlphaConsolidate keep", "AlphaConsolidate 应该先给结论再解释理由", 3, 1, 0),
+        ("kb_memory_consolidate_dup", "AlphaConsolidate dup", "AlphaConsolidate 应该先给结论再解释理由", 0, 0, 0),
+        ("kb_memory_consolidate_conflict", "AlphaConsolidate conflict", "AlphaConsolidate 不要先给结论再解释理由", 2, 0, 0),
+        ("kb_memory_consolidate_low", "AlphaLowUtility low", "AlphaLowUtility 应该保留旧做法", 1, 0, 3),
+    ]
+    with connect(db_path) as conn:
+        for item_uid, title, content, use_count, helpful_count, unhelpful_count in rows:
+            conn.execute(
+                """
+                INSERT INTO knowledge_items(
+                    project_id, item_uid, title, category, source_type, source_ref, content,
+                    tags_json, confidence, use_count, helpful_count, unhelpful_count, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'memory_lesson', 'manual', 'test', ?, '[]', 0.9, ?, ?, ?, 'active', ?, ?)
+                """,
+                (project_id, item_uid, title, content, use_count, helpful_count, unhelpful_count, now, now),
+            )
+
+    result = consolidate_memory_lessons(db_path, project_id=project_id)
+
+    assert result["duplicate_pairs"] == [{"winner": "kb_memory_consolidate_keep", "loser": "kb_memory_consolidate_dup", "similarity": result["duplicate_pairs"][0]["similarity"]}]
+    assert result["conflict_pairs"]
+    assert "kb_memory_consolidate_low" in result["low_utility_item_uids"]
+    with connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM knowledge_items WHERE category='memory_lesson'").fetchone()[0]
+        dup = dict(conn.execute("SELECT status, tags_json FROM knowledge_items WHERE item_uid='kb_memory_consolidate_dup'").fetchone())
+        conflict = dict(conn.execute("SELECT status, tags_json FROM knowledge_items WHERE item_uid='kb_memory_consolidate_conflict'").fetchone())
+        low = dict(conn.execute("SELECT status, tags_json FROM knowledge_items WHERE item_uid='kb_memory_consolidate_low'").fetchone())
+    assert count == 4
+    assert dup["status"] == "deprecated"
+    assert "suspected_duplicate" in json.loads(dup["tags_json"])
+    assert conflict["status"] == "active"
+    assert "suspected_conflict" in json.loads(conflict["tags_json"])
+    assert low["status"] == "deprecated"
+    assert "low_utility" in json.loads(low["tags_json"])
+
+
+def test_consolidation_ignores_deprecated_memory_lessons(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    project_id = _project_id(client)
+    now = "2026-01-01T00:00:00Z"
+    deprecated_updated_at = "2026-01-01T00:00:01Z"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO knowledge_items(
+                project_id, item_uid, title, category, source_type, source_ref, content,
+                tags_json, confidence, use_count, helpful_count, unhelpful_count, status, created_at, updated_at
+            )
+            VALUES (?, 'kb_memory_active_guard', 'AlphaDeprecatedGuard active', 'memory_lesson', 'manual', 'test',
+                    'AlphaDeprecatedGuard 应该先给结论', '[]', 0.9, 1, 0, 0, 'active', ?, ?)
+            """,
+            (project_id, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO knowledge_items(
+                project_id, item_uid, title, category, source_type, source_ref, content,
+                tags_json, confidence, use_count, helpful_count, unhelpful_count, status, created_at, updated_at
+            )
+            VALUES (?, 'kb_memory_deprecated_guard_dup', 'AlphaDeprecatedGuard deprecated duplicate', 'memory_lesson', 'manual', 'test',
+                    'AlphaDeprecatedGuard 应该先给结论', '["legacy"]', 0.9, 0, 0, 5, 'deprecated', ?, ?)
+            """,
+            (project_id, now, deprecated_updated_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO knowledge_items(
+                project_id, item_uid, title, category, source_type, source_ref, content,
+                tags_json, confidence, use_count, helpful_count, unhelpful_count, status, created_at, updated_at
+            )
+            VALUES (?, 'kb_memory_deprecated_guard_conflict', 'AlphaDeprecatedGuard deprecated conflict', 'memory_lesson', 'manual', 'test',
+                    'AlphaDeprecatedGuard 不要先给结论', '["archived"]', 0.9, 0, 0, 5, 'deprecated', ?, ?)
+            """,
+            (project_id, now, deprecated_updated_at),
+        )
+
+    result = consolidate_memory_lessons(db_path, project_id=project_id)
+
+    all_result_uids = set(result["low_utility_item_uids"] + result["updated_item_uids"] + result["duplicate_loser_uids"] + result["conflict_item_uids"])
+    for pair in result["duplicate_pairs"]:
+        all_result_uids.add(pair["winner"])
+        all_result_uids.add(pair["loser"])
+    for pair in result["conflict_pairs"]:
+        all_result_uids.add(pair["left"])
+        all_result_uids.add(pair["right"])
+    assert "kb_memory_deprecated_guard_dup" not in all_result_uids
+    assert "kb_memory_deprecated_guard_conflict" not in all_result_uids
+    with connect(db_path) as conn:
+        dup = dict(conn.execute("SELECT status, tags_json, updated_at FROM knowledge_items WHERE item_uid='kb_memory_deprecated_guard_dup'").fetchone())
+        conflict = dict(conn.execute("SELECT status, tags_json, updated_at FROM knowledge_items WHERE item_uid='kb_memory_deprecated_guard_conflict'").fetchone())
+    assert dup == {"status": "deprecated", "tags_json": '["legacy"]', "updated_at": deprecated_updated_at}
+    assert conflict == {"status": "deprecated", "tags_json": '["archived"]', "updated_at": deprecated_updated_at}
+
+
+def test_memory_consolidate_route_soft_marks_low_utility_active_memory(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    project_id = _project_id(client)
+    now = "2026-01-01T00:00:00Z"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO knowledge_items(
+                project_id, item_uid, title, category, source_type, source_ref, content,
+                tags_json, confidence, use_count, helpful_count, unhelpful_count, status, created_at, updated_at
+            )
+            VALUES (?, 'kb_memory_route_low_utility', 'AlphaRouteLow low utility', 'memory_lesson', 'manual', 'test',
+                    'AlphaRouteLow 应该保留旧做法', '[]', 0.9, 1, 0, 3, 'active', ?, ?)
+            """,
+            (project_id, now, now),
+        )
+
+    response = client.post("/api/personal/memory/consolidate")
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    assert set(payload) == {
+        "project_id",
+        "duplicate_pairs",
+        "conflict_pairs",
+        "low_utility_item_uids",
+        "updated_item_uids",
+        "duplicate_loser_uids",
+        "conflict_item_uids",
+    }
+    assert payload["project_id"] == project_id
+    assert payload["low_utility_item_uids"] == ["kb_memory_route_low_utility"]
+    assert payload["updated_item_uids"] == ["kb_memory_route_low_utility"]
+    with connect(db_path) as conn:
+        row = dict(conn.execute("SELECT status, tags_json FROM knowledge_items WHERE item_uid='kb_memory_route_low_utility'").fetchone())
+    assert row["status"] == "deprecated"
+    assert "low_utility" in json.loads(row["tags_json"])
+
+
+def test_learning_reflection_gate_skips_chitchat_but_not_material_signals() -> None:
+    assert learning_reflection_gate({"prompt": "谢谢"})["skip"] is True
+    assert learning_reflection_gate({"prompt": "好的"})["skip"] is True
+    assert learning_reflection_gate({"prompt": "你理解错了，Alpha 应该先确认我的纠正点"})["skip"] is False
+    assert learning_reflection_gate({"prompt": "批准这条经验"})["skip"] is False
+    assert learning_reflection_gate({"prompt": "生成 Alpha 功能规范"})["skip"] is False
+    assert learning_reflection_gate({"prompt": "给这个函数写 patch"})["skip"] is False
+    assert should_run_learning_reflector({"prompt": "谢谢"}, {"intent": "answer_only"}) is False
+    assert should_run_learning_reflector({"prompt": "谢谢"}, {"intent": "generate_document"}) is True
+
+
+def test_chitchat_turn_skips_learning_reflector_and_does_not_create_candidate(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    calls: list[str] = []
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        calls.append(purpose)
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post("/api/personal/chat/turn", json={"content": "谢谢"})
+
+    assert response.status_code == 200, response.json()
+    assert "personal_learning_reflect" not in calls
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0] == 0
+
+
+def test_correction_and_document_generation_are_not_gated_from_learning_reflector(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_active_source(client)
+    calls: list[dict[str, Any]] = []
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_learning_reflect":
+            calls.append(json.loads(user_prompt))
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    correction = client.post("/api/personal/chat/turn", json={"content": "你理解错了，AlphaGate 应该先确认我的纠正点"})
+    assert correction.status_code == 200, correction.json()
+    document = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaGate 功能规范"})
+    assert document.status_code == 200, document.json()
+
+    assert any(item["implicit_learning_events"] and item["implicit_learning_events"][0]["type"] == "explicit_correction" for item in calls)
+    assert any("生成 AlphaGate 功能规范" in item["user_message"] for item in calls)

@@ -54,7 +54,7 @@ class PersonalContextBuilder:
             ).fetchone()
             messages = conn.execute(
                 """
-                SELECT role, content FROM personal_session_messages
+                SELECT role, content, metadata_json FROM personal_session_messages
                 WHERE session_uid=?
                 ORDER BY id DESC LIMIT 12
                 """,
@@ -79,7 +79,7 @@ class PersonalContextBuilder:
             "sources": source_payload,
             "active_source_uids": [item["source_uid"] for item in source_payload],
             "active_draft": dict(draft) if draft else {},
-            "recent_messages": [dict(row) for row in reversed(messages)],
+            "recent_messages": [_message_context(row) for row in reversed(messages)],
             "knowledge_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in recalled["knowledge"]],
             "memory_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in recalled["memories"]],
             "knowledge": recalled["knowledge"],
@@ -98,6 +98,12 @@ def _requirement_summary(sources: list[dict[str, Any]], prompt: str) -> str:
     if lines:
         return "；".join(lines[:3])[:500]
     return text[:500]
+
+
+def _message_context(row: Any) -> dict[str, Any]:
+    payload = dict(row)
+    payload["metadata"] = _loads_json(payload.pop("metadata_json", "{}"), {})
+    return payload
 
 
 def _loads_json(text: str, default: Any) -> Any:
