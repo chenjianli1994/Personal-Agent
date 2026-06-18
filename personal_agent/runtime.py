@@ -15,7 +15,7 @@ from .content_guard import assert_personal_content_clean, personal_forbidden_hit
 from .context_builder import PersonalContextBuilder
 from .intent_router import PersonalIntentRouter
 from .input_documents import activate_input_sources
-from .knowledge_recall import record_recall_feedback, safe_recall_prompt_item
+from .knowledge_recall import billable_memory_item_uids, record_recall_feedback, safe_recall_prompt_item
 from .knowledge_learning import record_personal_feedback, review_latest_session_candidate
 from .learning_reflector import PersonalLearningReflector
 from .policy_guard import apply_personal_policy
@@ -256,12 +256,14 @@ class PersonalRuntime:
         llm = self._llm_answer(prompt=prompt, context=context, mode=mode)
         if llm:
             context_name = "input_source" if mode == "input_source_analysis" else "general"
+            billable_memory_uids = llm["billable_memory_item_uids"]
             metadata = {
                 "context": context_name,
                 "llm": llm["llm"],
                 "intent_route": _intent_metadata(route),
                 "injected_knowledge_item_uids": llm["injected_knowledge_item_uids"],
                 "injected_memory_item_uids": llm["injected_memory_item_uids"],
+                "billable_memory_item_uids": billable_memory_uids,
                 "memory_item_uids_used": llm["memory_item_uids_used"],
             }
             message = self._append_message(
@@ -270,7 +272,7 @@ class PersonalRuntime:
                 llm["answer"],
                 metadata,
             )
-            self._record_injected_recall_use(llm["injected_knowledge_item_uids"] + llm["injected_memory_item_uids"])
+            self._record_injected_recall_use(llm["injected_knowledge_item_uids"] + billable_memory_uids)
             return message
         answer = "LLM 回答调用不可用，本轮只保留安全回答路径；没有生成草稿、没有修改代码、没有执行工具。"
         return self._append_message(session_uid, "assistant", answer, {"context": "general", "intent_route": _intent_metadata(route), "fallback": True})
@@ -491,11 +493,14 @@ class PersonalRuntime:
         if not answer:
             return None
         injected_memory_uids = [str(item.get("item_uid") or "") for item in injected_memories if str(item.get("item_uid") or "").strip()]
-        memory_item_uids_used = _valid_used_uids(result.parsed.get("memory_item_uids_used"), injected_memory_uids)
+        billable_memory_uids = billable_memory_item_uids(injected_memories)
+        memory_item_uids_used = _valid_used_uids(result.parsed.get("memory_item_uids_used"), billable_memory_uids)
         return {
             "answer": answer,
             "injected_knowledge_item_uids": [str(item.get("item_uid") or "") for item in injected_knowledge if str(item.get("item_uid") or "").strip()],
             "injected_memory_item_uids": injected_memory_uids,
+            "injected_memories": injected_memories,
+            "billable_memory_item_uids": billable_memory_uids,
             "memory_item_uids_used": memory_item_uids_used,
             "llm": {
                 "call_id": result.call_id,
@@ -533,19 +538,14 @@ class PersonalRuntime:
         metadata = _loads_json(row["metadata_json"], {})
         item_uids = metadata.get("injected_memory_item_uids") if isinstance(metadata, dict) else []
         used_uids = metadata.get("memory_item_uids_used") if isinstance(metadata, dict) else []
-        used_uid_set = {str(uid) for uid in (used_uids or []) if str(uid).strip()}
-        for item_uid in dict.fromkeys(str(uid) for uid in (item_uids or []) if str(uid).strip()):
+        correction_uids = [str(uid) for uid in (used_uids or []) if str(uid).strip()]
+        if not correction_uids:
+            billable_uids = metadata.get("billable_memory_item_uids") if isinstance(metadata, dict) else []
+            fallback_uids = billable_uids if isinstance(billable_uids, list) else item_uids
+            correction_uids = [str(uid) for uid in (fallback_uids or []) if str(uid).strip()]
+        for item_uid in dict.fromkeys(correction_uids):
             try:
                 record_recall_feedback(self.db_path, item_uid=item_uid, event="unhelpful")
-            except ValueError:
-                continue
-        if not used_uid_set:
-            return
-        for item_uid in dict.fromkeys(str(uid) for uid in (item_uids or []) if str(uid).strip()):
-            if item_uid not in used_uid_set:
-                continue
-            try:
-                record_recall_feedback(self.db_path, item_uid=item_uid, event="helpful")
             except ValueError:
                 continue
 

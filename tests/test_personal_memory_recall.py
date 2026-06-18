@@ -137,6 +137,7 @@ def test_context_and_chat_prompt_inject_approved_memory_and_record_use_after_mes
     assert "AlphaPrompt" in memories[0]["content"]
     metadata = response.json()["message"]["metadata"]
     assert metadata["injected_memory_item_uids"] == [item_uid]
+    assert metadata["billable_memory_item_uids"] == [item_uid]
     stats = _item_stats(db_path, item_uid)
     assert stats["use_count"] == 1
     assert stats["helpful_count"] == 0
@@ -339,8 +340,51 @@ def test_document_generation_filters_forbidden_legacy_memory_from_prompt_and_acc
     assert memories[0]["content_redacted"] is True
     assert "content" in memories[0]["redacted_fields"]
     stats = _item_stats(db_path, "kb_memory_doc_polluted")
-    assert stats["use_count"] == 1
+    assert stats["use_count"] == 0
     assert stats["helpful_count"] == 0
+
+
+def test_document_generation_records_locally_redacted_memory_when_content_is_safe(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    project_id = _project_id(client)
+    _add_active_source(client)
+    polluted = FORBIDDEN_PERSONAL_TERMS[0]
+    now = "2026-01-01T00:00:00Z"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO knowledge_items(project_id, item_uid, title, category, source_type, source_ref, content, tags_json, confidence, status, created_at, updated_at)
+            VALUES (?, 'kb_memory_doc_title_polluted', ?, 'memory_lesson', 'manual', ?, 'AlphaDocTitleSafe keep observable behavior', '[]', 0.99, 'active', ?, ?)
+            """,
+            (project_id, f"AlphaDocTitleSafe {polluted}", f"legacy:{polluted}", now, now),
+        )
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_artifact_generate":
+            return LLMResult(
+                call_id=708,
+                provider="fake-test",
+                model="local-redaction-fixture",
+                status="ok",
+                parsed={
+                    "title": "AlphaDocTitleSafe 功能规范",
+                    "content_format": "markdown",
+                    "content": "# 功能规范\n\n## 功能目标\n- AlphaDocTitleSafe\n\n## 用户可观察行为\n- 保留可观察行为\n\n## 输入与输出\n- 输入来自资料\n\n## 状态与异常场景\n- 覆盖边界\n\n## 非目标\n- 不写实现细节\n\n## 验收标准\n- 可验证\n\n## 证据引用\n- source: current_prompt\n",
+                    "memory_item_uids_used": ["kb_memory_doc_title_polluted"],
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaDocTitleSafe 功能规范"})
+
+    assert response.status_code == 200, response.json()
+    stats = _item_stats(db_path, "kb_memory_doc_title_polluted")
+    assert stats["use_count"] == 1
+    assert stats["helpful_count"] == 1
 
 
 def test_failed_quality_gate_records_use_but_not_helpful(tmp_path: Path, monkeypatch) -> None:
@@ -530,6 +574,52 @@ def test_correction_feedback_marks_previous_injected_memory_unhelpful(tmp_path: 
     assert stats["unhelpful_count"] == 1
 
 
+def test_correction_feedback_only_marks_declared_used_memory_unhelpful(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    first_id = _create_candidate(client, "以后处理 AlphaCorrectionScope 时先给旧规则")
+    second_id = _create_candidate(client, "以后处理 AlphaCorrectionScope 时先给新规则")
+    _approve_candidate(client, first_id)
+    _approve_candidate(client, second_id)
+    first_uid = f"kb_memory_{first_id}"
+    second_uid = f"kb_memory_{second_id}"
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_chat_answer":
+            return LLMResult(
+                call_id=707,
+                provider="fake-test",
+                model="memory-chat-fixture",
+                status="ok",
+                parsed={
+                    "answer": "按 AlphaCorrectionScope 新规则回答。",
+                    "used_sources": [],
+                    "memory_item_uids_used": [second_uid],
+                    "limitations": [],
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    first = client.post("/api/personal/chat/turn", json={"content": "普通问题：AlphaCorrectionScope 怎么处理？"})
+    assert first.status_code == 200, first.json()
+    session_uid = first.json()["session"]["session_uid"]
+    metadata = first.json()["message"]["metadata"]
+    assert first_uid in metadata["injected_memory_item_uids"]
+    assert second_uid in metadata["injected_memory_item_uids"]
+    assert metadata["memory_item_uids_used"] == [second_uid]
+
+    correction = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "你理解错了，AlphaCorrectionScope 应该先确认纠正点"})
+
+    assert correction.status_code == 200, correction.json()
+    first_stats = _item_stats(db_path, first_uid)
+    second_stats = _item_stats(db_path, second_uid)
+    assert first_stats["unhelpful_count"] == 0
+    assert second_stats["unhelpful_count"] == 1
+
+
 def test_forbidden_legacy_memory_is_not_injected_or_counted(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     project_id = _project_id(client)
@@ -567,7 +657,8 @@ def test_forbidden_legacy_memory_is_not_injected_or_counted(tmp_path: Path, monk
     assert polluted not in captured["user_prompt"]
     metadata = response.json()["message"]["metadata"]
     assert metadata["injected_memory_item_uids"] == ["kb_memory_polluted"]
+    assert metadata["billable_memory_item_uids"] == []
     assert metadata["memory_item_uids_used"] == []
     stats = _item_stats(db_path, "kb_memory_polluted")
-    assert stats["use_count"] == 1
+    assert stats["use_count"] == 0
     assert stats["helpful_count"] == 0

@@ -12,7 +12,7 @@ from personal_agent.core.utils import json_dumps
 from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .artifact_quality import validate_generated_artifact
 from .artifact_drafts import create_artifact_draft, get_artifact_draft, revise_artifact_draft_manual
-from .knowledge_recall import recall_knowledge, record_recall_feedback, safe_recall_prompt_item
+from .knowledge_recall import billable_memory_item_uids, recall_knowledge, record_recall_feedback, safe_recall_prompt_item
 from .knowledge_learning import pending_session_memory_candidates
 from .source_semantic_model import build_source_semantic_model
 from .skill_registry import ensure_default_document_skills, load_skill_for_document_type
@@ -128,7 +128,7 @@ def propose_personal_artifact(
     )
     _record_generation_memory_feedback(
         db_path,
-        memories=context["prompt_memories"],
+        memories=context["billable_prompt_memories"],
         quality_passed=quality_passed,
         memory_item_uids_used=generated.get("memory_item_uids_used") or [],
     )
@@ -256,7 +256,7 @@ def revise_personal_artifact(
     )
     _record_generation_memory_feedback(
         db_path,
-        memories=context["prompt_memories"],
+        memories=context["billable_prompt_memories"],
         quality_passed=quality_passed,
         memory_item_uids_used=revised.get("memory_item_uids_used") or [],
     )
@@ -409,7 +409,9 @@ def _generation_context(
     sources = _load_sources(db_path, project_id=project_id, source_uids=source_uids)
     knowledge = recall_knowledge(db_path, project_id=project_id, query=prompt, limit=5, exclude_category="memory_lesson")
     memories = recall_knowledge(db_path, project_id=project_id, query=prompt, limit=5, category="memory_lesson")
-    prompt_memories = [item for item in memories if safe_recall_prompt_item(item, forbidden_text_checker=personal_forbidden_hits)]
+    prompt_memories = [safe_item for item in memories if (safe_item := safe_recall_prompt_item(item, forbidden_text_checker=personal_forbidden_hits))]
+    billable_memory_uids = set(billable_memory_item_uids(prompt_memories))
+    billable_prompt_memories = [item for item in prompt_memories if item.get("item_uid") in billable_memory_uids]
     session_memories = pending_session_memory_candidates(db_path, project_id=project_id, task_uid=session_task_uid, session_uid=session_task_uid)
     session_skill_candidates = [
         item
@@ -440,6 +442,7 @@ def _generation_context(
         "knowledge": knowledge,
         "memories": memories,
         "prompt_memories": prompt_memories,
+        "billable_prompt_memories": billable_prompt_memories,
         "session_memories": session_memories,
         "session_skill_update_candidates": session_skill_candidates,
         "source_semantic_model": source_semantic_model,
@@ -539,8 +542,9 @@ def _load_sources(db_path: Path, *, project_id: int, source_uids: list[str] | No
 
 
 def _record_generation_memory_feedback(db_path: Path, *, memories: list[dict[str, Any]], quality_passed: bool, memory_item_uids_used: list[str]) -> None:
-    helpful_uids = set(memory_item_uids_used if quality_passed else [])
-    for item in memories:
+    billable_uids = set(billable_memory_item_uids(memories))
+    helpful_uids = set(memory_item_uids_used if quality_passed else []) & billable_uids
+    for item in [memory for memory in memories if str(memory.get("item_uid") or "").strip() in billable_uids]:
         item_uid = str(item.get("item_uid") or "").strip()
         if not item_uid:
             continue

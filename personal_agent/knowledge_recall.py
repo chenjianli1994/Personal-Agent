@@ -142,6 +142,23 @@ def safe_recall_prompt_item(
     return payload
 
 
+def billable_memory_item_uids(items: list[dict[str, Any]]) -> list[str]:
+    result: list[str] = []
+    for item in items:
+        if not is_billable_memory_item(item):
+            continue
+        item_uid = str(item.get("item_uid") or "").strip()
+        if item_uid and item_uid not in result:
+            result.append(item_uid)
+    return result
+
+
+def is_billable_memory_item(item: dict[str, Any]) -> bool:
+    if str(item.get("category") or "").strip() != "memory_lesson":
+        return False
+    return not bool(item.get("content_redacted"))
+
+
 def _normalize_recall_item(item: dict[str, Any]) -> dict[str, Any]:
     result = dict(item)
     if "tags_json" in result:
