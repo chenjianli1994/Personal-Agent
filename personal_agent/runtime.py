@@ -26,6 +26,7 @@ from .skill_update_candidates import (
     list_skill_update_candidates,
     record_skill_update_candidate_review,
 )
+from .context_builder import _select_active_draft
 
 
 logger = logging.getLogger(__name__)
@@ -595,6 +596,7 @@ class PersonalRuntime:
 
     def _touch_session(self, session_uid: str, context: dict[str, Any]) -> None:
         with connect(self.db_path) as conn:
+            active_draft = _select_active_draft(conn, project_id=self.project_id, session_uid=session_uid)
             conn.execute(
                 """
                 UPDATE personal_sessions
@@ -603,7 +605,7 @@ class PersonalRuntime:
                 """,
                 (
                     (context["active_source_uids"] or [""])[0],
-                    str((context.get("active_draft") or {}).get("draft_uid") or ""),
+                    str((dict(active_draft) if active_draft else {}).get("draft_uid") or ""),
                     context.get("requirement_summary") or "",
                     utc_now(),
                     session_uid,

@@ -460,15 +460,33 @@ def test_active_draft_can_be_revised_via_llm_route(tmp_path: Path, monkeypatch) 
 
     generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
     assert generated.status_code == 200
+    session_uid = generated.json()["session"]["session_uid"]
     draft_uid = generated.json()["message"]["metadata"]["draft"]["draft_uid"]
 
-    revised = client.post("/api/personal/chat/turn", json={"content": "把刚才草稿补充异常场景"})
+    revised = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "把刚才草稿补充异常场景"})
     assert revised.status_code == 200
     message = revised.json()["message"]
     route = message["metadata"]["intent_route"]
     assert route["intent"] == "revise_draft"
     assert message["metadata"]["draft"]["draft_uid"] == draft_uid
     assert message["metadata"]["draft"]["current_revision"] == 2
+
+
+def test_active_draft_is_not_reused_across_sessions(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+
+    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    assert generated.status_code == 200
+
+    revised = client.post("/api/personal/chat/turn", json={"content": "把刚才草稿补充异常场景"})
+    assert revised.status_code == 200
+    route = revised.json()["message"]["metadata"]["intent_route"]
+    assert route["intent"] == "answer_only"
+    assert route["policy"]["fallback"] is True
+
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0] == 1
 
 
 def test_personal_session_management(tmp_path: Path, monkeypatch) -> None:

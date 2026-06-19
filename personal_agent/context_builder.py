@@ -43,15 +43,7 @@ class PersonalContextBuilder:
                     """,
                     (self.project_id,),
                 ).fetchall()
-            draft = conn.execute(
-                """
-                SELECT draft_uid, document_type, title, current_revision
-                FROM personal_drafts
-                WHERE project_id=? AND status='active' AND is_active=1
-                ORDER BY id DESC LIMIT 1
-                """,
-                (self.project_id,),
-            ).fetchone()
+            draft = _select_active_draft(conn, project_id=self.project_id, session_uid=session_uid)
             messages = conn.execute(
                 """
                 SELECT role, content, metadata_json FROM personal_session_messages
@@ -88,6 +80,59 @@ class PersonalContextBuilder:
             "code_evidence": latest_repository(self.db_path, self.project_id) or {},
             "requirement_summary": _requirement_summary(source_payload, prompt),
         }
+
+
+def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any:
+    session_row = conn.execute(
+        """
+        SELECT active_draft_uid
+        FROM personal_sessions
+        WHERE session_uid=? AND status='active'
+        """,
+        (session_uid,),
+    ).fetchone()
+    preferred_draft_uid = str(session_row["active_draft_uid"] or "").strip() if session_row else ""
+    if session_uid:
+        if preferred_draft_uid:
+            preferred = conn.execute(
+                """
+                SELECT draft_uid, document_type, title, current_revision, session_uid
+                FROM personal_drafts
+                WHERE project_id=? AND draft_uid=? AND session_uid=? AND status='active' AND is_active=1
+                """,
+                (project_id, preferred_draft_uid, session_uid),
+            ).fetchone()
+            if preferred is not None:
+                return preferred
+        return conn.execute(
+            """
+            SELECT draft_uid, document_type, title, current_revision, session_uid
+            FROM personal_drafts
+            WHERE project_id=? AND session_uid=? AND status='active' AND is_active=1
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+            """,
+            (project_id, session_uid),
+        ).fetchone()
+    if preferred_draft_uid:
+        preferred = conn.execute(
+            """
+            SELECT draft_uid, document_type, title, current_revision, session_uid
+            FROM personal_drafts
+            WHERE project_id=? AND draft_uid=? AND status='active' AND is_active=1
+            """,
+            (project_id, preferred_draft_uid),
+        ).fetchone()
+        if preferred is not None:
+            return preferred
+    return conn.execute(
+        """
+        SELECT draft_uid, document_type, title, current_revision, session_uid
+        FROM personal_drafts
+        WHERE project_id=? AND status='active' AND is_active=1
+        ORDER BY updated_at DESC, id DESC LIMIT 1
+        """,
+        (project_id,),
+    ).fetchone()
 
 
 def _requirement_summary(sources: list[dict[str, Any]], prompt: str) -> str:

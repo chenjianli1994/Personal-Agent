@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from personal_agent.core.database import connect
 from personal_agent.app import create_personal_app
 from personal_agent.core.database import init_db
+from personal_agent.context_builder import PersonalContextBuilder
 
 
 def test_personal_artifact_draft_create_revise_and_history(tmp_path: Path, monkeypatch) -> None:
@@ -148,6 +149,85 @@ def test_personal_draft_create_and_list_preserve_session_uid(tmp_path: Path, mon
     scoped = client.get("/api/personal/drafts", params={"session_uid": "session_alpha"})
     assert scoped.status_code == 200
     assert [item["draft_uid"] for item in scoped.json()] == [draft["draft_uid"]]
+
+
+def test_personal_drafts_allow_multiple_active_per_session_and_document_type_scope(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+
+    requirement = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "requirement_analysis_report", "session_uid": "session_a", "title": "需求", "content": "# 需求"},
+    )
+    spec = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "functional_spec", "session_uid": "session_a", "title": "规格", "content": "# 规格"},
+    )
+    other_session = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "functional_spec", "session_uid": "session_b", "title": "规格B", "content": "# 规格B"},
+    )
+
+    assert requirement.status_code == 200
+    assert spec.status_code == 200
+    assert other_session.status_code == 200
+
+    drafts_a = client.get("/api/personal/drafts", params={"session_uid": "session_a"}).json()
+    by_uid = {item["draft_uid"]: item for item in drafts_a}
+    assert by_uid[requirement.json()["draft_uid"]]["is_active"] is True
+    assert by_uid[spec.json()["draft_uid"]]["is_active"] is True
+
+    drafts_b = client.get("/api/personal/drafts", params={"session_uid": "session_b"}).json()
+    assert drafts_b[0]["draft_uid"] == other_session.json()["draft_uid"]
+    assert drafts_b[0]["is_active"] is True
+
+
+def test_context_builder_prefers_session_active_draft_uid_and_activate_updates_focus(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+    first_turn = client.post("/api/personal/chat/turn", json={"content": "创建会话A"})
+    second_turn = client.post("/api/personal/chat/turn", json={"content": "创建会话B"})
+    session_a = first_turn.json()["session"]["session_uid"]
+    session_b = second_turn.json()["session"]["session_uid"]
+
+    requirement = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "requirement_analysis_report", "session_uid": session_a, "title": "需求A", "content": "# 需求A"},
+    ).json()
+    spec_v1 = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "functional_spec", "session_uid": session_a, "title": "规格A1", "content": "# 规格A1"},
+    ).json()
+    spec_v2 = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "functional_spec", "session_uid": session_a, "title": "规格A2", "content": "# 规格A2", "make_active": False},
+    ).json()
+    client.post(
+        "/api/personal/drafts",
+        json={"document_type": "functional_spec", "session_uid": session_b, "title": "规格B", "content": "# 规格B"},
+    )
+
+    db_path = tmp_path / "agent.db"
+    builder = PersonalContextBuilder(db_path, 1)
+
+    before_activate = builder.build(session_uid=session_a, prompt="查看当前草稿")
+    assert before_activate["active_draft"]["draft_uid"] == spec_v1["draft_uid"]
+
+    activated = client.post(f"/api/personal/drafts/{spec_v2['draft_uid']}/activate")
+    assert activated.status_code == 200
+
+    after_activate = builder.build(session_uid=session_a, prompt="查看当前草稿")
+    assert after_activate["active_draft"]["draft_uid"] == spec_v2["draft_uid"]
+    assert after_activate["active_draft"]["session_uid"] == session_a
+
+    other_context = builder.build(session_uid=session_b, prompt="查看当前草稿")
+    assert other_context["active_draft"]["session_uid"] == session_b
+    assert other_context["active_draft"]["draft_uid"] != spec_v2["draft_uid"]
+
+    with connect(db_path) as conn:
+        session_row = conn.execute("SELECT active_draft_uid FROM personal_sessions WHERE session_uid=?", (session_a,)).fetchone()
+    assert session_row["active_draft_uid"] == spec_v2["draft_uid"]
+    assert requirement["draft_uid"] != after_activate["active_draft"]["draft_uid"]
 
 
 def _client(tmp_path: Path) -> TestClient:

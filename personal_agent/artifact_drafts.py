@@ -58,7 +58,7 @@ def create_artifact_draft(
     now = utc_now()
     with connect(db_path) as conn:
         if make_active:
-            conn.execute("UPDATE personal_drafts SET is_active=0 WHERE project_id=?", (project_id,))
+            _clear_active_scope(conn, project_id=project_id, session_uid=session_uid, document_type=document_type)
         conn.execute(
             """
             INSERT INTO personal_drafts(
@@ -93,6 +93,8 @@ def create_artifact_draft(
             """,
             (revision_uid, draft_uid, project_id, content, json_dumps(metadata or {}), now),
         )
+        if make_active:
+            _update_session_active_draft(conn, session_uid=session_uid, draft_uid=draft_uid)
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
 
 
@@ -202,13 +204,16 @@ def revise_artifact_draft_manual(
     with connect(db_path) as conn:
         row = conn.execute(
             """
-            SELECT id, current_revision FROM personal_drafts
+            SELECT id, current_revision, session_uid, document_type
+            FROM personal_drafts
             WHERE project_id=? AND draft_uid=? AND status IN ('active', 'quality_failed')
             """,
             (project_id, draft_uid),
         ).fetchone()
         if row is None:
             raise ValueError("draft not found")
+        draft_session_uid = str(row["session_uid"] or "").strip()
+        document_type = str(row["document_type"] or "").strip()
         next_index = int(row["current_revision"]) + 1
         conn.execute(
             """
@@ -220,7 +225,7 @@ def revise_artifact_draft_manual(
             (revision_uid, draft_uid, project_id, next_index, content, json_dumps(metadata or {}), now),
         )
         if make_active:
-            conn.execute("UPDATE personal_drafts SET is_active=0 WHERE project_id=?", (project_id,))
+            _clear_active_scope(conn, project_id=project_id, session_uid=draft_session_uid, document_type=document_type)
         conn.execute(
             """
             UPDATE personal_drafts
@@ -230,23 +235,59 @@ def revise_artifact_draft_manual(
             """,
             (next_index, json_dumps(metadata or {}), status, 1 if make_active else 0, now, row["id"]),
         )
+        if make_active:
+            _update_session_active_draft(conn, session_uid=draft_session_uid, draft_uid=draft_uid)
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
 
 
 def activate_artifact_draft(db_path: Path, *, project_id: int, draft_uid: str) -> dict[str, Any]:
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT id FROM personal_drafts WHERE project_id=? AND draft_uid=? AND status IN ('active', 'quality_failed')",
+            """
+            SELECT id, session_uid, document_type
+            FROM personal_drafts
+            WHERE project_id=? AND draft_uid=? AND status IN ('active', 'quality_failed')
+            """,
             (project_id, draft_uid),
         ).fetchone()
         if row is None:
             raise ValueError("draft not found")
-        conn.execute("UPDATE personal_drafts SET is_active=0 WHERE project_id=?", (project_id,))
+        draft_session_uid = str(row["session_uid"] or "").strip()
+        document_type = str(row["document_type"] or "").strip()
+        _clear_active_scope(conn, project_id=project_id, session_uid=draft_session_uid, document_type=document_type)
         conn.execute(
             "UPDATE personal_drafts SET is_active=1, updated_at=? WHERE id=?",
             (utc_now(), row["id"]),
         )
+        _update_session_active_draft(conn, session_uid=draft_session_uid, draft_uid=draft_uid)
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
+
+
+def _clear_active_scope(conn: Any, *, project_id: int, session_uid: str, document_type: str) -> None:
+    if not session_uid:
+        conn.execute("UPDATE personal_drafts SET is_active=0 WHERE project_id=?", (project_id,))
+        return
+    conn.execute(
+        """
+        UPDATE personal_drafts
+        SET is_active=0
+        WHERE project_id=? AND session_uid=? AND document_type=?
+        """,
+        (project_id, session_uid, document_type),
+    )
+
+
+def _update_session_active_draft(conn: Any, *, session_uid: str, draft_uid: str) -> None:
+    if not session_uid:
+        return
+    conn.execute(
+        """
+        UPDATE personal_sessions
+        SET active_draft_uid=?, updated_at=?
+        WHERE session_uid=? AND status='active'
+        """,
+        (draft_uid, utc_now(), session_uid),
+    )
 
 
 def _draft_row_to_payload(row: Any, *, include_content: bool) -> dict[str, Any]:
