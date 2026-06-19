@@ -43,9 +43,11 @@ from .input_documents import (
 )
 from .knowledge_learning import (
     approve_personal_candidate,
+    dismiss_personal_memory_lesson,
     deprecate_personal_knowledge,
     import_source_to_knowledge,
     list_personal_knowledge,
+    personal_inbox,
     personal_learning_candidates,
     personal_learning_summary,
     record_personal_feedback,
@@ -802,6 +804,11 @@ def register_personal_agent_routes(
         _require_capability(context, "knowledge_learning")
         return personal_learning_candidates(context.db_path, project_id=context.project_id, limit=limit)
 
+    @app.get("/api/personal/inbox")
+    def personal_inbox_route(limit: int = 100) -> list[dict[str, Any]]:
+        _require_capability(context, "knowledge_learning")
+        return personal_inbox(context.db_path, project_id=context.project_id, limit=limit)
+
     @app.post("/api/personal/learning/feedback")
     def personal_learning_feedback(req: PersonalLearningFeedbackRequest) -> dict[str, Any]:
         _require_capability(context, "knowledge_learning")
@@ -841,6 +848,20 @@ def register_personal_agent_routes(
                 context.db_path,
                 project_id=context.project_id,
                 candidate_id=candidate_id,
+                reviewer=req.reviewer,
+                comment=req.comment,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/personal/learning/{item_uid}/dismiss")
+    def personal_learning_dismiss(item_uid: str, req: PersonalLearningReviewRequest) -> dict[str, Any]:
+        _require_capability(context, "knowledge_learning")
+        try:
+            return dismiss_personal_memory_lesson(
+                context.db_path,
+                project_id=context.project_id,
+                item_uid=item_uid,
                 reviewer=req.reviewer,
                 comment=req.comment,
             )

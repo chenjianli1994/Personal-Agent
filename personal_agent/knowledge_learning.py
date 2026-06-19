@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from personal_agent.core.database import connect
-from personal_agent.core.knowledge_base import import_knowledge_document, search_knowledge, update_knowledge_document_status
+from personal_agent.core.knowledge_base import import_knowledge_document, index_knowledge_item_search_entry, search_knowledge, update_knowledge_document_status
 from personal_agent.core.services_min import (
     approve_memory_candidate,
     build_knowledge_summary,
@@ -19,6 +19,7 @@ from personal_agent.core.services_min import (
     reject_memory_candidate,
 )
 from personal_agent.core.utils import json_dumps, utc_now
+from .skill_update_candidates import list_skill_update_candidates as list_personal_skill_update_candidates
 
 
 def list_personal_knowledge(db_path: Path, *, project_id: int, limit: int = 100) -> dict[str, Any]:
@@ -115,12 +116,63 @@ def deprecate_personal_knowledge(db_path: Path, *, project_id: int, knowledge_id
     return updated_doc
 
 
+def dismiss_personal_memory_lesson(db_path: Path, *, project_id: int, item_uid: str, reviewer: str = "local_user", comment: str = "") -> dict[str, Any]:
+    now = utc_now()
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM knowledge_items
+            WHERE item_uid=? AND category='memory_lesson' AND (project_id=? OR project_id IS NULL)
+            """,
+            (item_uid, project_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"memory lesson not found: {item_uid}")
+        conn.execute(
+            "UPDATE knowledge_items SET status='deprecated', updated_at=? WHERE item_uid=?",
+            (now, item_uid),
+        )
+    index_knowledge_item_search_entry(db_path, item_uid)
+    _audit(
+        db_path,
+        project_id,
+        "PERSONAL_MEMORY_LESSON_DISMISSED",
+        f"个人记忆经验已撤销：{row['title']}",
+        {"item_uid": item_uid, "reviewer": reviewer, "comment": comment},
+    )
+    with connect(db_path) as conn:
+        updated = conn.execute("SELECT * FROM knowledge_items WHERE item_uid=?", (item_uid,)).fetchone()
+    return _decode_json_fields(dict(updated), ["tags_json"])
+
+
+def personal_inbox(db_path: Path, *, project_id: int, limit: int = 100) -> list[dict[str, Any]]:
+    learning_items = [
+        {"kind": "learning_candidate", **item}
+        for item in personal_learning_candidates(db_path, project_id=project_id, limit=limit)
+    ]
+    skill_items = [
+        {"kind": "skill_update_candidate", **item}
+        for item in list_personal_skill_update_candidates(db_path, project_id=project_id, status="candidate")[:limit]
+    ]
+    merged = [*learning_items, *skill_items]
+    merged.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    return merged[:limit]
+
+
 def personal_learning_summary(db_path: Path, *, project_id: int) -> dict[str, Any]:
     return build_learning_summary(db_path, project_id)
 
 
 def personal_learning_candidates(db_path: Path, *, project_id: int, limit: int = 100) -> list[dict[str, Any]]:
-    return list_memory_candidates(db_path, project_id, limit=limit)
+    items = list_memory_candidates(db_path, project_id, limit=limit)
+    result: list[dict[str, Any]] = []
+    for item in items:
+        payload = dict(item)
+        if str(payload.get("status") or "") == "approved" and int(payload.get("id") or 0) > 0:
+            payload["item_uid"] = f"kb_memory_{int(payload['id'])}"
+        result.append(payload)
+    return result
 
 
 def record_personal_feedback(

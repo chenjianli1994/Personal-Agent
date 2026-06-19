@@ -15,7 +15,7 @@ import {
 } from "@ant-design/icons";
 import type { DragEvent, KeyboardEvent } from "react";
 import { useEffect, useRef, useState } from "react";
-import type { AgentLlmStatus, PersonalMessage, PersonalSession } from "./types";
+import type { AgentLlmStatus, PersonalMessage, PersonalRecallProvenance, PersonalSession } from "./types";
 
 export type LocalMessage = PersonalMessage & { pending?: boolean };
 
@@ -287,6 +287,7 @@ function Bubble({ item, onOpenDrafts }: { item: LocalMessage; onOpenDrafts: (dra
   const draft = asRecord(item.metadata?.draft);
   const draftUid = typeof draft.draft_uid === "string" ? draft.draft_uid : "";
   const attachments = messageAttachments(item.metadata?.attachments);
+  const provenance = recallProvenance(item.metadata?.recall_provenance);
   return (
     <div className={`personal-bubble-row ${isUser ? "user" : "assistant"}`}>
       <div className="personal-avatar">{isUser ? <UserOutlined /> : <RobotOutlined />}</div>
@@ -306,6 +307,19 @@ function Bubble({ item, onOpenDrafts }: { item: LocalMessage; onOpenDrafts: (dra
           </div>
         ) : null}
         <div className="personal-bubble-content">{item.content}</div>
+        {!isUser && provenance.length ? (
+          <div className="message-attachments">
+            {provenance.map((entry) => (
+              <div className="message-attachment-card" key={`${entry.kind}-${entry.uid}`}>
+                <BookOutlined />
+                <div>
+                  <Typography.Text strong>{entry.title || entry.uid}</Typography.Text>
+                  <Typography.Text type="secondary" className="personal-small">{entry.kind === "memory" ? "记忆来源" : "知识来源"}</Typography.Text>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
         {!isUser && draftUid ? (
           <Button size="small" icon={<FileDoneOutlined />} className="bubble-draft-link" onClick={() => onOpenDrafts(draftUid)}>
             打开 draft {shortId(draftUid)}
@@ -326,6 +340,18 @@ function messageAttachments(value: unknown): MessageAttachment[] {
       source_type: typeof item.source_type === "string" ? item.source_type : "",
       original_name: typeof item.original_name === "string" ? item.original_name : "",
     }));
+}
+
+function recallProvenance(value: unknown): PersonalRecallProvenance[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      uid: typeof item.uid === "string" ? item.uid : "",
+      title: typeof item.title === "string" ? item.title : "",
+      kind: typeof item.kind === "string" ? item.kind : "",
+    }))
+    .filter((item) => item.uid);
 }
 
 function shortId(value: string) {

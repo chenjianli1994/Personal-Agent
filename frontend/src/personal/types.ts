@@ -44,6 +44,12 @@ export type PersonalMessage = {
   pending?: boolean;
 };
 
+export type PersonalRecallProvenance = {
+  uid: string;
+  title: string;
+  kind: string;
+};
+
 export type PersonalSessionEvent = {
   id?: number;
   event_uid?: string;
@@ -472,6 +478,7 @@ export type PersonalLearningCandidate = {
   problem: string;
   lesson: string;
   status: string;
+  item_uid?: string;
   evidence_refs?: Record<string, unknown>;
   lesson_type?: string;
   expected_behavior?: string;
@@ -500,4 +507,23 @@ export type PersonalLearningFeedbackInput = {
 export type PersonalLearningReviewInput = {
   reviewer?: string;
   comment?: string;
+};
+
+export type PersonalInboxItem = {
+  kind: "learning_candidate" | "skill_update_candidate";
+  id: number;
+  item_uid?: string;
+  created_at?: string;
+  updated_at?: string;
+  status?: string;
+  title?: string;
+  problem?: string;
+  lesson?: string;
+  evidence_refs?: Record<string, unknown>;
+  lesson_type?: string;
+  expected_behavior?: string;
+  anti_behavior?: string;
+  validation_query?: string;
+  target_skill?: string;
+  proposed_change?: string;
 };

@@ -140,6 +140,8 @@ def test_context_and_chat_prompt_inject_approved_memory_and_record_use_after_mes
     metadata = response.json()["message"]["metadata"]
     assert metadata["injected_memory_item_uids"] == [item_uid]
     assert metadata["billable_memory_item_uids"] == [item_uid]
+    provenance = metadata["recall_provenance"]
+    assert any(item == {"uid": item_uid, "title": "个人反馈 #1", "kind": "memory"} for item in provenance)
     stats = _item_stats(db_path, item_uid)
     assert stats["use_count"] == 1
     assert stats["helpful_count"] == 0
@@ -148,6 +150,37 @@ def test_context_and_chat_prompt_inject_approved_memory_and_record_use_after_mes
     context = client.get(f"/api/personal/sessions/{response.json()['session']['session_uid']}").json()
     assert any(item["metadata"].get("injected_memory_item_uids") == [item_uid] for item in context["messages"] if item["role"] == "assistant")
     assert recall_knowledge(db_path, project_id=project_id, query="AlphaPrompt", category="memory_lesson")[0]["use_count"] == 1
+
+
+def test_dismissed_memory_lesson_is_removed_from_search_recall_index(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    project_id = _project_id(client)
+    candidate_id = _create_candidate(client, "浠ュ悗澶勭悊 AlphaDismiss 鏃跺厛璇存槑鍙洖鏉ユ簮")
+    _approve_candidate(client, candidate_id)
+    item_uid = f"kb_memory_{candidate_id}"
+
+    before = recall_knowledge(db_path, project_id=project_id, query="AlphaDismiss", category="memory_lesson")
+    assert [item["item_uid"] for item in before] == [item_uid]
+
+    dismissed = client.post(
+        f"/api/personal/learning/{item_uid}/dismiss",
+        json={"reviewer": "tester", "comment": "dismiss recalled lesson"},
+    )
+
+    assert dismissed.status_code == 200, dismissed.json()
+    assert dismissed.json()["status"] == "deprecated"
+    with connect(db_path) as conn:
+        item_row = dict(conn.execute("SELECT status FROM knowledge_items WHERE item_uid=?", (item_uid,)).fetchone())
+        search_row = dict(
+            conn.execute(
+                "SELECT status FROM knowledge_search_entries WHERE source_kind='item' AND item_uid=?",
+                (item_uid,),
+            ).fetchone()
+        )
+    assert item_row["status"] == "deprecated"
+    assert search_row["status"] == "deprecated"
+    assert recall_knowledge(db_path, project_id=project_id, query="AlphaDismiss", category="memory_lesson") == []
+    assert all(item["item_uid"] != item_uid for item in search_knowledge(db_path, "AlphaDismiss", project_id=project_id, limit=5))
 
 
 def test_fallback_answer_does_not_record_memory_use(tmp_path: Path, monkeypatch) -> None:

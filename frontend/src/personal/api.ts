@@ -30,6 +30,7 @@ import type {
   PersonalKnowledgeItem,
   PersonalKnowledgeSearchInput,
   PersonalKnowledgeSummary,
+  PersonalInboxItem,
   PersonalLearningCandidate,
   PersonalLearningFeedbackInput,
   PersonalLearningReviewInput,
@@ -141,10 +142,13 @@ export const personalAgentApi = {
     apiPost<PersonalLearningReviewInput, PersonalKnowledgeItem>(`/api/personal/knowledge/${knowledgeId}/deprecate`, body),
   learningSummary: () => apiGet<PersonalLearningSummary>("/api/personal/learning/summary"),
   learningCandidates: () => apiGet<PersonalLearningCandidate[]>("/api/personal/learning/candidates"),
+  inbox: () => apiGet<PersonalInboxItem[]>("/api/personal/inbox"),
   createLearningFeedback: (body: PersonalLearningFeedbackInput) =>
     apiPost<PersonalLearningFeedbackInput, PersonalLearningCandidate>("/api/personal/learning/feedback", body),
   approveLearningCandidate: (candidateId: number, body: PersonalLearningReviewInput) =>
     apiPost<PersonalLearningReviewInput, PersonalLearningCandidate>(`/api/personal/learning/candidates/${candidateId}/approve`, body),
   rejectLearningCandidate: (candidateId: number, body: PersonalLearningReviewInput) =>
-    apiPost<PersonalLearningReviewInput, PersonalLearningCandidate>(`/api/personal/learning/candidates/${candidateId}/reject`, body)
+    apiPost<PersonalLearningReviewInput, PersonalLearningCandidate>(`/api/personal/learning/candidates/${candidateId}/reject`, body),
+  dismissMemoryLesson: (itemUid: string, body: PersonalLearningReviewInput) =>
+    apiPost<PersonalLearningReviewInput, PersonalKnowledgeItem>(`/api/personal/learning/${encodeURIComponent(itemUid)}/dismiss`, body)
 };

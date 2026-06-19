@@ -8,6 +8,7 @@ from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS
 from personal_agent.core.database import connect, init_db
 from personal_agent.core.knowledge_base import ensure_knowledge_search_index, import_knowledge_code_directory, import_knowledge_document, search_knowledge
 from personal_agent.app import create_personal_app
+from personal_agent.skill_update_candidates import create_skill_update_candidate
 
 
 def test_personal_knowledge_import_search_and_deprecate_source(tmp_path: Path, monkeypatch) -> None:
@@ -360,6 +361,43 @@ def test_personal_chat_ordinary_question_does_not_create_learning_candidate(tmp_
     with connect(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0]
     assert count == 0
+
+
+def test_personal_inbox_merges_learning_and_skill_candidates_with_kind_and_item_uid(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    approved = client.post("/api/personal/learning/feedback", json={"feedback": "浠ュ悗 AlphaInbox 问题先给结论"})
+    assert approved.status_code == 200
+    approved_id = approved.json()["id"]
+    approved_result = client.post(
+        f"/api/personal/learning/candidates/{approved_id}/approve",
+        json={"reviewer": "tester", "comment": "approve inbox memory"},
+    )
+    assert approved_result.status_code == 200
+
+    project_id = client.get("/api/personal/context").json()["project_id"]
+    skill_candidate = create_skill_update_candidate(
+        db_path,
+        project_id=project_id,
+        target_skill="functional-spec",
+        reason="inbox merge test",
+        proposed_change="以后功能规格不要写实现细节",
+        source="test_fixture",
+    )
+
+    inbox = client.get("/api/personal/inbox")
+    assert inbox.status_code == 200
+    items = inbox.json()
+    learning_item = next(item for item in items if item["kind"] == "learning_candidate" and item["id"] == approved_id)
+    skill_item = next(item for item in items if item["kind"] == "skill_update_candidate" and item["id"] == skill_candidate["id"])
+    assert learning_item["status"] == "approved"
+    assert learning_item["item_uid"] == f"kb_memory_{approved_id}"
+    assert skill_item["status"] == "candidate"
+    assert skill_item["target_skill"] == "functional-spec"
 
 
 def test_personal_skill_update_candidate_approval_and_rejection_flow(tmp_path: Path, monkeypatch) -> None:

@@ -308,6 +308,7 @@ class PersonalRuntime:
                 "injected_memory_item_uids": llm["injected_memory_item_uids"],
                 "billable_memory_item_uids": billable_memory_uids,
                 "memory_item_uids_used": llm["memory_item_uids_used"],
+                "recall_provenance": _recall_provenance(context),
             }
             message = self._append_message(
                 session_uid,
@@ -682,6 +683,17 @@ def _valid_used_uids(value: Any, allowed_uids: list[str]) -> list[str]:
         if uid in allowed and uid not in result:
             result.append(uid)
     return result
+
+
+def _recall_provenance(context: dict[str, Any]) -> list[dict[str, str]]:
+    provenance: list[dict[str, str]] = []
+    for kind, items in (("knowledge", context.get("knowledge") or []), ("memory", context.get("memories") or [])):
+        for item in items[:10]:
+            uid = str(item.get("item_uid") or "").strip()
+            title = str(item.get("title") or "").strip()
+            if uid:
+                provenance.append({"uid": uid, "title": title, "kind": kind})
+    return provenance
 
 
 def should_run_learning_reflector(context: dict[str, Any], route: dict[str, Any]) -> bool:

@@ -33,6 +33,7 @@ import type {
   PersonalArtifactDraft,
   PersonalCodebaseConfig,
   PersonalInputSource,
+  PersonalInboxItem,
   PersonalKnowledgeItem,
   PersonalLearningCandidate,
   PersonalLlmConfig,
@@ -1321,8 +1322,8 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
   const [correctedBehavior, setCorrectedBehavior] = useState("");
 
   const summaryQuery = useQuery({ queryKey: ["personal-learning-summary"], queryFn: personalAgentApi.learningSummary, retry: false });
-  const candidatesQuery = useQuery({ queryKey: ["personal-learning-candidates"], queryFn: personalAgentApi.learningCandidates, retry: false });
-  const candidates = candidatesQuery.data ?? [];
+  const inboxQuery = useQuery({ queryKey: ["personal-inbox"], queryFn: personalAgentApi.inbox, retry: false });
+  const candidates = inboxQuery.data ?? [];
   const summary = summaryQuery.data;
   const pendingCount = learningStatusCount(summary, "candidate");
   const approvedCount = summary?.approved_lessons ?? learningStatusCount(summary, "approved");
@@ -1332,6 +1333,7 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["personal-learning-summary"] });
     queryClient.invalidateQueries({ queryKey: ["personal-learning-candidates"] });
+    queryClient.invalidateQueries({ queryKey: ["personal-inbox"] });
     queryClient.invalidateQueries({ queryKey: ["personal-knowledge"] });
   };
   const createFeedback = useMutation({
@@ -1357,6 +1359,14 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
     onSuccess: () => {
       refresh();
       message.success("经验已拒绝。");
+    },
+    onError: showMutationError
+  });
+  const dismiss = useMutation({
+    mutationFn: (itemUid: string) => personalAgentApi.dismissMemoryLesson(itemUid, { reviewer: "local_user", comment: "personal memory dismissed" }),
+    onSuccess: () => {
+      refresh();
+      message.success("记忆经验已撤销。");
     },
     onError: showMutationError
   });
@@ -1397,36 +1407,48 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
         </Button>
       </Space>
       <List
-        loading={candidatesQuery.isLoading}
+        loading={inboxQuery.isLoading}
         dataSource={candidates}
         locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有学习候选" /> }}
-        renderItem={(item: PersonalLearningCandidate) => (
+        renderItem={(item: PersonalInboxItem) => (
           <List.Item
             actions={[
-              item.status === "candidate" ? (
+              item.kind === "learning_candidate" && item.status === "candidate" ? (
                 <Button key="approve" size="small" type="primary" loading={approve.isPending} onClick={() => approve.mutate(item.id)}>
                   批准
                 </Button>
               ) : null,
-              item.status === "candidate" ? (
+              item.kind === "learning_candidate" && item.status === "candidate" ? (
                 <Button key="reject" size="small" danger loading={reject.isPending} onClick={() => reject.mutate(item.id)}>
                   拒绝
+                </Button>
+              ) : null,
+              item.kind === "learning_candidate" && item.status === "approved" && item.item_uid ? (
+                <Button key="dismiss" size="small" danger loading={dismiss.isPending} onClick={() => dismiss.mutate(item.item_uid!)}>
+                  撤销
                 </Button>
               ) : null
             ].filter(Boolean)}
           >
             <Space direction="vertical" size={4} className="full-width">
               <Space wrap>
-                <Typography.Text strong>{learningCandidateTitle(item)}</Typography.Text>
-                <Tag color={item.status === "approved" ? "green" : item.status === "rejected" ? "red" : "orange"}>{learningStatusLabel(item.status)}</Tag>
-                {item.lesson_type ? <Tag>{learningTypeLabel(item.lesson_type)}</Tag> : null}
+                <Typography.Text strong>{item.kind === "skill_update_candidate" ? item.target_skill || "Skill 更新" : learningCandidateTitle(item)}</Typography.Text>
+                <Tag color={item.status === "approved" ? "green" : item.status === "rejected" ? "red" : "orange"}>{learningStatusLabel(item.status || "")}</Tag>
+                {item.kind ? <Tag>{item.kind === "skill_update_candidate" ? "Skill 候选" : "学习候选"}</Tag> : null}
+                {"lesson_type" in item && item.lesson_type ? <Tag>{learningTypeLabel(item.lesson_type)}</Tag> : null}
                 {item.created_at ? <Typography.Text type="secondary" className="personal-small">{item.created_at}</Typography.Text> : null}
               </Space>
-              <Typography.Text>提炼后的规则：{readableLearningText(item.lesson || item.expected_behavior)}</Typography.Text>
-              {item.anti_behavior ? <Typography.Text type="secondary">避免行为：{readableLearningText(item.anti_behavior)}</Typography.Text> : null}
-              <Typography.Text type="secondary" className="personal-small">
-                来源：{learningSourceLabel(item)}；用户原始反馈：{readableLearningText(String(item.evidence_refs?.feedback_text || item.validation_query || ""))}
-              </Typography.Text>
+              {item.kind === "skill_update_candidate" ? (
+                <Typography.Text>建议修改：{readableLearningText(String(item.proposed_change || ""))}</Typography.Text>
+              ) : (
+                <>
+                  <Typography.Text>提炼后的规则：{readableLearningText(item.lesson || item.expected_behavior)}</Typography.Text>
+                  {item.anti_behavior ? <Typography.Text type="secondary">避免行为：{readableLearningText(item.anti_behavior)}</Typography.Text> : null}
+                  <Typography.Text type="secondary" className="personal-small">
+                    来源：{learningSourceLabel(item)}；用户原始反馈：{readableLearningText(String(item.evidence_refs?.feedback_text || item.validation_query || ""))}
+                  </Typography.Text>
+                </>
+              )}
             </Space>
           </List.Item>
         )}
@@ -1462,8 +1484,8 @@ function learningTypeLabel(type: string): string {
   return labels[type] ?? type;
 }
 
-function learningCandidateTitle(item: PersonalLearningCandidate): string {
-  if (isUnreadableLearningText(item.title)) {
+function learningCandidateTitle(item: PersonalLearningCandidate | PersonalInboxItem): string {
+  if (isUnreadableLearningText(item.title || "")) {
     return "待批准经验";
   }
   if (item.title && !item.title.includes("/")) {
@@ -1472,7 +1494,7 @@ function learningCandidateTitle(item: PersonalLearningCandidate): string {
   return `${learningTypeLabel(item.lesson_type || "") || "经验"} #${item.id}`;
 }
 
-function learningSourceLabel(item: PersonalLearningCandidate): string {
+function learningSourceLabel(item: PersonalLearningCandidate | PersonalInboxItem): string {
   const evidence = item.evidence_refs ?? {};
   const source = String(evidence.source || "");
   if (source === "personal_learning_reflect") return "对话自动提炼";
