@@ -43,6 +43,7 @@ def test_personal_phase5_code_patch_draft_uses_patch_propose_and_apply_policy(tm
         "/api/personal/artifacts/code-patch",
         json={
             "prompt": "invalid speed should return default zero",
+            "session_uid": "session_patch",
             "target_symbol": "VehicleSpeed_Read",
             "directives": [
                 {
@@ -57,6 +58,7 @@ def test_personal_phase5_code_patch_draft_uses_patch_propose_and_apply_policy(tm
     assert patch.status_code == 200
     draft = patch.json()
     assert draft["artifact_type"] == "c_code_diff"
+    assert draft["session_uid"] == "session_patch"
     assert draft["content_format"] == "diff"
     assert "return 0;" in draft["content"]
     assert draft["metadata"]["generation"]["patch_propose"]["patch_plan"]["trace_impact"]["implementation_stage"] == "code_change"
@@ -77,14 +79,46 @@ def test_personal_phase5_code_patch_draft_uses_patch_propose_and_apply_policy(tm
     assert "return 0;" in source.read_text(encoding="utf-8")
 
 
+def test_personal_patch_propose_tool_chain_preserves_session_uid(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client, _db_path, _repo, _test_command = _client_with_code_repo(tmp_path)
+
+    proposed = client.post(
+        "/api/personal/patch/propose",
+        json={
+            "change_text": "invalid speed should return default zero",
+            "session_uid": "session_tool_patch",
+            "target_symbol": "VehicleSpeed_Read",
+            "directives": [
+                {
+                    "file_path": "speed.c",
+                    "find": "        return -1;\n",
+                    "replace": "        return 0;\n",
+                    "description": "invalid speed default",
+                }
+            ],
+            "dry_run": False,
+        },
+    )
+
+    assert proposed.status_code == 200
+    artifact = proposed.json()["output"]["artifact"]
+    assert artifact["session_uid"] == "session_tool_patch"
+
+    created = client.get(f"/api/personal/drafts/{artifact['draft_uid']}")
+    assert created.status_code == 200
+    assert created.json()["session_uid"] == "session_tool_patch"
+
+
 def test_personal_phase5_unit_test_code_draft_and_validation_allowlist(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
     client, _db_path, _repo, test_command = _client_with_code_repo(tmp_path)
 
-    draft = client.post("/api/personal/artifacts/unit-test-code", json={"prompt": "为 VehicleSpeed_Read 生成单元测试代码"})
+    draft = client.post("/api/personal/artifacts/unit-test-code", json={"prompt": "为 VehicleSpeed_Read 生成单元测试代码", "session_uid": "session_unit"})
     assert draft.status_code == 200
     payload = draft.json()
     assert payload["artifact_type"] == "unit_test_code_or_diff"
+    assert payload["session_uid"] == "session_unit"
     assert payload["content_format"] == "diff"
     assert "test_normal_path" in payload["content"]
     assert payload["metadata"]["generation"]["boundaries"]["requires_whitelisted_validation"] is True

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from personal_agent.core.database import connect
 from personal_agent.app import create_personal_app
+from personal_agent.core.database import init_db
 
 
 def test_personal_artifact_draft_create_revise_and_history(tmp_path: Path, monkeypatch) -> None:
@@ -113,6 +114,40 @@ def test_personal_artifact_draft_validation_errors(tmp_path: Path, monkeypatch) 
 
     missing = client.get("/api/personal/artifacts/draft_missing/content")
     assert missing.status_code == 404
+
+
+def test_personal_drafts_schema_migrates_session_lineage_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "agent.db"
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(personal_drafts)").fetchall()}
+
+    assert {"session_uid", "derived_from_draft_uid", "lineage_stale"} <= columns
+
+
+def test_personal_draft_create_and_list_preserve_session_uid(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+
+    created = client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "functional_spec",
+            "session_uid": "session_alpha",
+            "title": "会话草稿",
+            "content": "# 会话草稿\n内容",
+        },
+    )
+    assert created.status_code == 200
+    draft = created.json()
+    assert draft["session_uid"] == "session_alpha"
+    assert draft["derived_from_draft_uid"] == ""
+    assert draft["lineage_stale"] is False
+
+    scoped = client.get("/api/personal/drafts", params={"session_uid": "session_alpha"})
+    assert scoped.status_code == 200
+    assert [item["draft_uid"] for item in scoped.json()] == [draft["draft_uid"]]
 
 
 def _client(tmp_path: Path) -> TestClient:

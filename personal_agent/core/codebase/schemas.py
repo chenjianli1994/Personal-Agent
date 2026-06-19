@@ -129,6 +129,7 @@ class ChangeRequest:
     project_id: int
     requirement_id: str
     change_text: str
+    session_uid: str = ""
     target_symbol: str = ""
     target_file: str = ""
     directives: list[PatchDirective] = field(default_factory=list)

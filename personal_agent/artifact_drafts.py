@@ -31,6 +31,9 @@ def create_artifact_draft(
     document_type: str = "",
     content_format: str = "markdown",
     source_uid: str = "",
+    session_uid: str = "",
+    derived_from_draft_uid: str = "",
+    lineage_stale: bool = False,
     metadata: dict[str, Any] | None = None,
     make_active: bool = True,
     status: str = "active",
@@ -59,18 +62,21 @@ def create_artifact_draft(
         conn.execute(
             """
             INSERT INTO personal_drafts(
-                draft_uid, project_id, source_uid, document_type, title, content_format,
-                current_revision, status, is_active, metadata_json, created_at, updated_at
+                draft_uid, project_id, source_uid, session_uid, document_type, title, content_format,
+                current_revision, derived_from_draft_uid, lineage_stale, status, is_active, metadata_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 draft_uid,
                 project_id,
                 source_uid.strip(),
+                session_uid.strip(),
                 document_type,
                 title,
                 content_format,
+                derived_from_draft_uid.strip(),
+                1 if lineage_stale else 0,
                 status,
                 1 if make_active else 0,
                 json_dumps(metadata or {}),
@@ -90,8 +96,13 @@ def create_artifact_draft(
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
 
 
-def list_artifact_drafts(db_path: Path, *, project_id: int) -> list[dict[str, Any]]:
+def list_artifact_drafts(db_path: Path, *, project_id: int, session_uid: str | None = None) -> list[dict[str, Any]]:
     with connect(db_path) as conn:
+        where = ["d.project_id=?", "d.status IN ('active', 'quality_failed')"]
+        params: list[Any] = [project_id]
+        if session_uid is not None:
+            where.append("d.session_uid=?")
+            params.append(session_uid)
         rows = conn.execute(
             """
             SELECT d.*,
@@ -100,10 +111,12 @@ def list_artifact_drafts(db_path: Path, *, project_id: int) -> list[dict[str, An
             FROM personal_drafts d
             LEFT JOIN personal_draft_revisions r
               ON r.draft_uid=d.draft_uid AND r.revision_index=d.current_revision
-            WHERE d.project_id=? AND d.status IN ('active', 'quality_failed')
+            WHERE """
+            + " AND ".join(where)
+            + """
             ORDER BY d.is_active DESC, d.id DESC
             """,
-            (project_id,),
+            params,
         ).fetchall()
     return [_draft_row_to_payload(row, include_content=False) for row in rows]
 
@@ -243,11 +256,14 @@ def _draft_row_to_payload(row: Any, *, include_content: bool) -> dict[str, Any]:
         "draft_uid": row["draft_uid"],
         "project_id": row["project_id"],
         "source_uid": row["source_uid"],
+        "session_uid": row["session_uid"],
         "document_type": row["document_type"],
         "title": row["title"],
         "content_format": row["content_format"],
         "current_revision": row["current_revision"],
         "revision_count": row["revision_count"] or 0,
+        "derived_from_draft_uid": row["derived_from_draft_uid"],
+        "lineage_stale": bool(row["lineage_stale"]),
         "status": row["status"],
         "is_active": bool(row["is_active"]),
         "metadata": _loads_json(row["metadata_json"], {}),

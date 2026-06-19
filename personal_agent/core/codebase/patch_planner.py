@@ -95,6 +95,7 @@ def _change_request(project_id: int, payload: dict[str, Any]) -> ChangeRequest:
         project_id=project_id,
         requirement_id=str(payload.get("requirement_id") or ""),
         change_text=str(payload.get("change_text") or payload.get("change_hint") or ""),
+        session_uid=str(payload.get("session_uid") or ""),
         target_symbol=str(payload.get("target_symbol") or ""),
         target_file=str(payload.get("target_file") or ""),
         directives=directives,
@@ -225,14 +226,15 @@ def _write_candidate_patch_artifact(db_path: Path, request: ChangeRequest, patch
         conn.execute(
             """
             INSERT INTO personal_drafts(
-                draft_uid, project_id, source_uid, document_type, title, content_format,
-                current_revision, status, is_active, metadata_json, created_at, updated_at
+                draft_uid, project_id, source_uid, session_uid, document_type, title, content_format,
+                current_revision, derived_from_draft_uid, lineage_stale, status, is_active, metadata_json, created_at, updated_at
             )
-            VALUES (?, ?, '', 'c_code_diff', ?, 'diff', 1, 'active', 1, ?, ?, ?)
+            VALUES (?, ?, '', ?, 'c_code_diff', ?, 'diff', 1, '', 0, 'active', 1, ?, ?, ?)
             """,
             (
                 draft_uid,
                 request.project_id,
+                request.session_uid,
                 "Personal Code Patch Candidate",
                 json_dumps(metadata),
                 now,
@@ -266,6 +268,7 @@ def _write_candidate_patch_artifact(db_path: Path, request: ChangeRequest, patch
         "file_path": str(patch_path),
         "plan_path": str(plan_path),
         "status": "active",
+        "session_uid": request.session_uid,
         "document_type": "c_code_diff",
         "artifact_type": "c_code_diff",
     }
@@ -300,6 +303,7 @@ def _request_payload(request: ChangeRequest) -> dict[str, Any]:
         "project_id": request.project_id,
         "requirement_id": request.requirement_id,
         "change_text": request.change_text,
+        "session_uid": request.session_uid,
         "target_symbol": request.target_symbol,
         "target_file": request.target_file,
         "directives": [

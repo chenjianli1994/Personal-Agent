@@ -722,10 +722,13 @@ CREATE TABLE IF NOT EXISTS personal_drafts (
     draft_uid TEXT NOT NULL UNIQUE,
     project_id INTEGER NOT NULL,
     source_uid TEXT NOT NULL DEFAULT '',
+    session_uid TEXT NOT NULL DEFAULT '',
     document_type TEXT NOT NULL,
     title TEXT NOT NULL,
     content_format TEXT NOT NULL DEFAULT 'markdown',
     current_revision INTEGER NOT NULL DEFAULT 1,
+    derived_from_draft_uid TEXT NOT NULL DEFAULT '',
+    lineage_stale INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     is_active INTEGER NOT NULL DEFAULT 0,
     metadata_json TEXT NOT NULL DEFAULT '{}',
@@ -915,6 +918,15 @@ def _ensure_compat_columns(conn: sqlite3.Connection) -> None:
             "prompt_version_id": "TEXT NOT NULL DEFAULT ''",
             "policy_version_id": "TEXT NOT NULL DEFAULT ''",
             "contract_version_id": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _add_columns(
+        conn,
+        "personal_drafts",
+        {
+            "session_uid": "TEXT NOT NULL DEFAULT ''",
+            "derived_from_draft_uid": "TEXT NOT NULL DEFAULT ''",
+            "lineage_stale": "INTEGER NOT NULL DEFAULT 0",
         },
     )
     _add_columns(

@@ -49,6 +49,7 @@ def propose_personal_artifact(
     document_type: str = "",
     source_uids: list[str] | None = None,
     session_task_uid: str = "",
+    session_uid: str = "",
     make_active: bool = True,
 ) -> dict[str, Any]:
     document_type = _resolve_document_type(prompt, document_type)
@@ -88,6 +89,7 @@ def propose_personal_artifact(
         content=generated["content"],
         content_format=generated["content_format"],
         source_uid=context["source_uids"][0] if context["source_uids"] else "",
+        session_uid=session_uid or session_task_uid,
         metadata={
             "generation": {
                 "phase": "skill_llm_document_generation",
@@ -157,6 +159,7 @@ def revise_personal_artifact(
     draft_uid: str,
     feedback: str,
     session_task_uid: str = "",
+    session_uid: str = "",
     make_active: bool = True,
 ) -> dict[str, Any]:
     feedback = feedback.strip()
@@ -271,6 +274,7 @@ def propose_personal_code_patch(
     target_symbol: str = "",
     target_file: str = "",
     directives: list[dict[str, Any]] | None = None,
+    session_uid: str = "",
     make_active: bool = True,
 ) -> dict[str, Any]:
     patch_result = propose_patch(
@@ -281,6 +285,7 @@ def propose_personal_code_patch(
             "target_symbol": target_symbol,
             "target_file": target_file,
             "directives": directives or [],
+            "session_uid": session_uid,
             "dry_run": True,
         },
     )
@@ -294,6 +299,7 @@ def propose_personal_code_patch(
         title="C 代码 Patch 草稿",
         content=patch_text,
         content_format="diff",
+        session_uid=session_uid,
         metadata={
             "generation": {
                 "phase": "phase5_code_patch_linkage",
@@ -322,6 +328,7 @@ def propose_personal_unit_test_code(
     prompt: str,
     source_uids: list[str] | None = None,
     session_task_uid: str = "",
+    session_uid: str = "",
     make_active: bool = True,
 ) -> dict[str, Any]:
     context = _generation_context(db_path, project_id=project_id, prompt=prompt, source_uids=source_uids, session_task_uid=session_task_uid)
@@ -334,6 +341,7 @@ def propose_personal_unit_test_code(
         content=content,
         content_format="diff",
         source_uid=context["source_uids"][0] if context["source_uids"] else "",
+        session_uid=session_uid or session_task_uid,
         metadata={
             "generation": {
                 "phase": "phase5_unit_test_code_linkage",

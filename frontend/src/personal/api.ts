@@ -84,7 +84,7 @@ export const personalAgentApi = {
     apiPost<PersonalLearningReviewInput, PersonalSkillUpdateCandidate>(`/api/personal/skills/update-candidates/${candidateId}/approve`, body),
   rejectSkillUpdateCandidate: (candidateId: number, body: PersonalLearningReviewInput) =>
     apiPost<PersonalLearningReviewInput, PersonalSkillUpdateCandidate>(`/api/personal/skills/update-candidates/${candidateId}/reject`, body),
-  draftList: () => apiGet<PersonalArtifactDraft[]>("/api/personal/drafts"),
+  draftList: (sessionUid?: string) => apiGet<PersonalArtifactDraft[]>(params("/api/personal/drafts", { session_uid: sessionUid })),
   draftDetail: (draftUid: string) => apiGet<PersonalArtifactDraft>(`/api/personal/drafts/${encodeURIComponent(draftUid)}`),
   draftContent: (draftUid: string, revisionIndex?: number) =>
     apiGet<PersonalArtifactContent>(params(`/api/personal/drafts/${encodeURIComponent(draftUid)}/content`, { revision_index: revisionIndex })),

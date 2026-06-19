@@ -160,11 +160,14 @@ export type PersonalArtifactDraft = {
   draft_uid: string;
   project_id?: number;
   source_uid?: string;
+  session_uid?: string;
   document_type: string;
   title: string;
   content_format: string;
   current_revision: number;
   revision_count: number;
+  derived_from_draft_uid?: string;
+  lineage_stale?: boolean;
   status?: string;
   is_active: boolean;
   metadata: Record<string, unknown>;
@@ -243,6 +246,7 @@ export type PersonalSkillUpdateCandidate = {
 
 export type PersonalArtifactDraftCreateInput = {
   document_type: string;
+  session_uid?: string;
   title: string;
   content: string;
   content_format?: string;
@@ -252,6 +256,7 @@ export type PersonalArtifactDraftCreateInput = {
 };
 
 export type PersonalArtifactDraftReviseInput = {
+  session_uid?: string;
   content: string;
   metadata?: Record<string, unknown>;
   make_active?: boolean;
@@ -259,18 +264,21 @@ export type PersonalArtifactDraftReviseInput = {
 
 export type PersonalArtifactProposeInput = {
   prompt: string;
+  session_uid?: string;
   document_type?: string;
   source_uids?: string[];
   make_active?: boolean;
 };
 
 export type PersonalArtifactNaturalReviseInput = {
+  session_uid?: string;
   feedback: string;
   make_active?: boolean;
 };
 
 export type PersonalArtifactCodePatchInput = {
   prompt: string;
+  session_uid?: string;
   target_symbol?: string;
   target_file?: string;
   directives?: PatchDirectiveInput[];
@@ -279,6 +287,7 @@ export type PersonalArtifactCodePatchInput = {
 
 export type PersonalArtifactUnitTestCodeInput = {
   prompt: string;
+  session_uid?: string;
   source_uids?: string[];
   make_active?: boolean;
 };
@@ -399,6 +408,7 @@ export type PatchDirectiveInput = {
 
 export type PatchProposeInput = {
   change_text: string;
+  session_uid?: string;
   target_symbol?: string;
   target_file?: string;
   directives: PatchDirectiveInput[];

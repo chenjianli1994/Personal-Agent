@@ -142,6 +142,7 @@ class PersonalPatchDirective(BaseModel):
 
 class PersonalPatchProposeRequest(BaseModel):
     change_text: str
+    session_uid: str = ""
     target_symbol: str = ""
     target_file: str = ""
     directives: list[PersonalPatchDirective] = []
@@ -175,6 +176,7 @@ class PersonalSourceTextRequest(BaseModel):
 
 class PersonalArtifactDraftCreateRequest(BaseModel):
     document_type: str = ""
+    session_uid: str = ""
     title: str
     content: str
     content_format: str = "markdown"
@@ -184,6 +186,7 @@ class PersonalArtifactDraftCreateRequest(BaseModel):
 
 
 class PersonalArtifactDraftReviseRequest(BaseModel):
+    session_uid: str = ""
     content: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     make_active: bool = True
@@ -191,18 +194,21 @@ class PersonalArtifactDraftReviseRequest(BaseModel):
 
 class PersonalArtifactProposeRequest(BaseModel):
     prompt: str
+    session_uid: str = ""
     document_type: str = ""
     source_uids: list[str] = Field(default_factory=list)
     make_active: bool = True
 
 
 class PersonalArtifactReviseRequest(BaseModel):
+    session_uid: str = ""
     feedback: str
     make_active: bool = True
 
 
 class PersonalArtifactCodePatchRequest(BaseModel):
     prompt: str
+    session_uid: str = ""
     target_symbol: str = ""
     target_file: str = ""
     directives: list[PersonalPatchDirective] = []
@@ -211,6 +217,7 @@ class PersonalArtifactCodePatchRequest(BaseModel):
 
 class PersonalArtifactUnitTestRequest(BaseModel):
     prompt: str
+    session_uid: str = ""
     source_uids: list[str] = Field(default_factory=list)
     make_active: bool = True
 
@@ -444,6 +451,7 @@ def register_personal_agent_routes(
                 content=req.content,
                 content_format=req.content_format,
                 source_uid=req.source_uid,
+                session_uid=req.session_uid,
                 metadata=req.metadata,
                 make_active=req.make_active,
             )
@@ -451,9 +459,9 @@ def register_personal_agent_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/personal/drafts")
-    def personal_artifact_drafts() -> list[dict[str, Any]]:
+    def personal_artifact_drafts(session_uid: str | None = None) -> list[dict[str, Any]]:
         _require_capability(context, "artifact_drafts")
-        return list_artifact_drafts(context.db_path, project_id=context.project_id)
+        return list_artifact_drafts(context.db_path, project_id=context.project_id, session_uid=session_uid)
 
     @app.post("/api/personal/documents/propose")
     def personal_artifact_propose(req: PersonalArtifactProposeRequest) -> dict[str, Any]:
@@ -464,6 +472,7 @@ def register_personal_agent_routes(
                 workspace=context.workspace,
                 project_id=context.project_id,
                 prompt=req.prompt,
+                session_uid=req.session_uid,
                 document_type=req.document_type,
                 source_uids=req.source_uids,
                 make_active=req.make_active,
@@ -480,6 +489,7 @@ def register_personal_agent_routes(
                 workspace=context.workspace,
                 project_id=context.project_id,
                 prompt=str(req.get("prompt") or ""),
+                session_uid=str(req.get("session_uid") or ""),
                 document_type=str(req.get("document_type") or req.get("artifact" + "_type") or ""),
                 source_uids=[str(item) for item in (req.get("source_uids") or [])],
                 make_active=bool(req.get("make_active", True)),
@@ -560,6 +570,7 @@ def register_personal_agent_routes(
                 context.db_path,
                 project_id=context.project_id,
                 prompt=req.prompt,
+                session_uid=req.session_uid,
                 target_symbol=req.target_symbol,
                 target_file=req.target_file,
                 directives=[_model_to_dict(item) for item in req.directives],
@@ -576,6 +587,7 @@ def register_personal_agent_routes(
                 context.db_path,
                 project_id=context.project_id,
                 prompt=req.prompt,
+                session_uid=req.session_uid,
                 source_uids=req.source_uids,
                 make_active=req.make_active,
             )
@@ -602,6 +614,7 @@ def register_personal_agent_routes(
                 context.db_path,
                 project_id=context.project_id,
                 document_type=str(req.get("document_type") or req.get("artifact" + "_type") or ""),
+                session_uid=str(req.get("session_uid") or ""),
                 title=str(req.get("title") or ""),
                 content=str(req.get("content") or ""),
                 content_format=str(req.get("content_format") or "markdown"),
@@ -614,9 +627,9 @@ def register_personal_agent_routes(
             raise HTTPException(status_code=400, detail=detail) from exc
 
     @app.get("/api/personal/artifacts/drafts")
-    def personal_artifact_drafts_alias() -> list[dict[str, Any]]:
+    def personal_artifact_drafts_alias(session_uid: str | None = None) -> list[dict[str, Any]]:
         _require_capability(context, "artifact_drafts")
-        return list_artifact_drafts(context.db_path, project_id=context.project_id)
+        return list_artifact_drafts(context.db_path, project_id=context.project_id, session_uid=session_uid)
 
     @app.get("/api/personal/drafts/{draft_uid}")
     def personal_artifact_draft(draft_uid: str) -> dict[str, Any]:
@@ -678,6 +691,7 @@ def register_personal_agent_routes(
                 workspace=context.workspace,
                 draft_uid=draft_uid,
                 feedback=req.feedback,
+                session_uid=req.session_uid,
                 make_active=req.make_active,
             )
         except ValueError as exc:
@@ -945,6 +959,7 @@ def register_personal_agent_routes(
             "patch_propose",
             {
                 "change_text": req.change_text,
+                "session_uid": req.session_uid,
                 "target_symbol": req.target_symbol,
                 "target_file": req.target_file,
                 "directives": [_model_to_dict(item) for item in req.directives],
