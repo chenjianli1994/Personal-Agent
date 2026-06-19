@@ -29,6 +29,7 @@ def test_personal_phase5_detailed_design_uses_code_evidence(tmp_path: Path, monk
     assert "Macro / Type / Variable 证据" in payload["content"]
     assert "VehicleSpeed_Read" in payload["content"]
     assert payload["metadata"]["generation"]["boundaries"]["generates_code_patch"] is False
+    assert payload["metadata"]["generation"]["evidence_refs"]
 
     with connect(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
@@ -121,6 +122,8 @@ def test_personal_phase5_unit_test_code_draft_and_validation_allowlist(tmp_path:
     assert payload["session_uid"] == "session_unit"
     assert payload["content_format"] == "diff"
     assert "test_normal_path" in payload["content"]
+    assert payload["generation"]["impact"]
+    assert payload["generation"]["impact"]["passed"] is True
     assert payload["metadata"]["generation"]["boundaries"]["requires_whitelisted_validation"] is True
 
     rejected = client.post(
@@ -146,6 +149,22 @@ def test_personal_phase5_unit_test_code_draft_and_validation_allowlist(tmp_path:
     created = client.get(f"/api/personal/artifacts/{metadata['created_draft_uids'][0]}").json()
     assert created["artifact_type"] == "unit_test_code_or_diff"
     assert "test_exception_or_diagnostic_path" in created["content"]
+
+
+def test_requirement_layer_document_does_not_inject_code_impact(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client, _db_path, _repo, _test_command = _client_with_code_repo(tmp_path)
+
+    requirement = client.post(
+        "/api/personal/artifacts/propose",
+        json={"prompt": "生成需求分析报告，描述 VehicleSpeed_Read 的需求", "artifact_type": "requirement_analysis_report"},
+    )
+
+    assert requirement.status_code == 200
+    payload = requirement.json()
+    assert payload["artifact_type"] == "requirement_analysis_report"
+    assert payload["metadata"]["generation"].get("impact") in (None, {})
+    assert "Codebase Impact 证据" not in payload["content"]
 
 
 def test_codebase_search_reports_symbol_and_include_counts_for_multiple_files(tmp_path: Path, monkeypatch) -> None:

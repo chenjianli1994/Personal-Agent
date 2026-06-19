@@ -38,6 +38,7 @@ LINEAGE_PREDECESSOR_BY_DOCUMENT_TYPE = {
     "test_case_spec": "detailed_design",
     "unit_test_code_or_diff": "test_case_spec",
 }
+IMPACT_ENABLED_DOCUMENT_TYPES = {"detailed_design", "test_case_spec", "unit_test_code_or_diff"}
 
 
 class DocumentQualityError(ValueError):
@@ -352,6 +353,7 @@ def propose_personal_unit_test_code(
         prompt=prompt,
         source_uids=source_uids,
         session_task_uid=session_uid or session_task_uid,
+        document_type="unit_test_code_or_diff",
     )
     content = _unit_test_code_or_diff(context)
     draft = create_artifact_draft(
@@ -489,7 +491,7 @@ def _generation_context(
             "session_memory_candidate_ids": [item["id"] for item in session_memories],
             "session_skill_update_candidate_ids": [item["id"] for item in session_skill_candidates],
         },
-        "impact": _detailed_design_impact(db_path, project_id, prompt) if document_type == "detailed_design" else {},
+        "impact": _detailed_design_impact(db_path, project_id, prompt) if document_type in IMPACT_ENABLED_DOCUMENT_TYPES else {},
     }
 
 
