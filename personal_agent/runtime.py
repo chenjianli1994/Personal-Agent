@@ -655,15 +655,18 @@ class PersonalRuntime:
 
 
 def _intent_metadata(route: dict[str, Any]) -> dict[str, Any]:
+    policy = route.get("policy") or {"allowed": True, "fallback": False, "reason": ""}
+    route_degraded = bool(route.get("router_source") == "fallback" or policy.get("fallback"))
     return {
         "intent": route.get("intent"),
         "confidence": route.get("confidence"),
         "target_document_type": route.get("target_document_type", ""),
         "answer_mode": route.get("answer_mode", ""),
         "router_source": route.get("router_source", ""),
+        "route_degraded": route_degraded,
         "reason": route.get("reason", ""),
         "llm": route.get("llm") or {},
-        "policy": route.get("policy") or {"allowed": True, "fallback": False, "reason": ""},
+        "policy": policy,
     }
 
 

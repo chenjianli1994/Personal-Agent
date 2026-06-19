@@ -431,6 +431,7 @@ def test_policy_guard_blocks_document_generation_without_active_source(tmp_path:
     route = message["metadata"]["intent_route"]
     assert route["intent"] == "answer_only"
     assert route["policy"]["fallback"] is True
+    assert route["route_degraded"] is True
     assert "没有激活输入材料" in route["policy"]["reason"]
 
     with connect(db_path) as conn:
@@ -446,6 +447,7 @@ def test_low_confidence_route_does_not_execute_generation(tmp_path: Path, monkey
     route = answer.json()["message"]["metadata"]["intent_route"]
     assert route["intent"] == "answer_only"
     assert route["policy"]["fallback"] is True
+    assert route["route_degraded"] is True
     assert "置信度过低" in route["policy"]["reason"]
 
     with connect(db_path) as conn:

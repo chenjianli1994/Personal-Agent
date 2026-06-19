@@ -81,7 +81,7 @@ class PersonalLLMGateway:
         error = ""
         version_refs = {"prompt_version_id": "", "policy_version_id": "", "contract_version_id": ""}
         try:
-            provider = self._select_provider()
+            provider = self._select_provider(purpose=purpose)
             if provider["name"] == "fake":
                 parsed = self._fake_completion(purpose, user_prompt)
                 raw_text = json_dumps(parsed)
@@ -113,11 +113,11 @@ class PersonalLLMGateway:
         parsed["_contract_version_id"] = ""
         return LLMResult(call_id=call_id, provider=provider["name"], model=provider["model"], status=status, parsed=parsed, raw_text=raw_text)
 
-    def _select_provider(self) -> dict[str, str]:
+    def _select_provider(self, purpose: str = "") -> dict[str, str]:
         provider_name = os.environ.get("PERSONAL_AGENT_LLM_PROVIDER", "").lower()
         if provider_name == "fake":
             return {"name": "fake", "model": "personal-fake-semantic-fixture", "api_key": "", "base_url": ""}
-        model = os.environ.get("PERSONAL_AGENT_LLM_MODEL", "")
+        model = self._select_model_for_purpose(purpose)
         if provider_name == "deepseek" or (not provider_name and os.environ.get("DEEPSEEK_API_KEY")):
             if not os.environ.get("DEEPSEEK_API_KEY"):
                 raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=deepseek requires DEEPSEEK_API_KEY.")
@@ -158,6 +158,17 @@ class PersonalLLMGateway:
             "LLM_NOT_CONFIGURED",
             "No personal Agent LLM provider configured. Set DEEPSEEK_API_KEY, DASHSCOPE_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, or set PERSONAL_AGENT_LLM_PROVIDER=fake for local tests.",
         )
+
+    def _select_model_for_purpose(self, purpose: str) -> str:
+        default_model = os.environ.get("PERSONAL_AGENT_LLM_MODEL", "")
+        if self._purpose_tier(purpose) != "fast":
+            return default_model
+        return os.environ.get("PERSONAL_AGENT_LLM_MODEL_FAST", "") or default_model
+
+    def _purpose_tier(self, purpose: str) -> str:
+        if purpose in {"personal_intent_route", "personal_skill_reflect", "personal_learning_reflect"}:
+            return "fast"
+        return "default"
 
     def _provider_config_source(self, provider_name: str) -> str:
         explicit = os.environ.get("PERSONAL_AGENT_LLM_PROVIDER", "").strip()
