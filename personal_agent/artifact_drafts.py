@@ -235,6 +235,8 @@ def revise_artifact_draft_manual(
             """,
             (next_index, json_dumps(metadata or {}), status, 1 if make_active else 0, now, row["id"]),
         )
+        if status != "quality_failed":
+            _mark_downstream_lineage_stale(conn, project_id=project_id, draft_uid=draft_uid)
         if make_active:
             _update_session_active_draft(conn, session_uid=draft_session_uid, draft_uid=draft_uid)
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
@@ -259,6 +261,7 @@ def activate_artifact_draft(db_path: Path, *, project_id: int, draft_uid: str) -
             "UPDATE personal_drafts SET is_active=1, updated_at=? WHERE id=?",
             (utc_now(), row["id"]),
         )
+        _mark_downstream_lineage_stale(conn, project_id=project_id, draft_uid=draft_uid)
         _update_session_active_draft(conn, session_uid=draft_session_uid, draft_uid=draft_uid)
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
 
@@ -287,6 +290,17 @@ def _update_session_active_draft(conn: Any, *, session_uid: str, draft_uid: str)
         WHERE session_uid=? AND status='active'
         """,
         (draft_uid, utc_now(), session_uid),
+    )
+
+
+def _mark_downstream_lineage_stale(conn: Any, *, project_id: int, draft_uid: str) -> None:
+    conn.execute(
+        """
+        UPDATE personal_drafts
+        SET lineage_stale=1, updated_at=?
+        WHERE project_id=? AND derived_from_draft_uid=? AND status IN ('active', 'quality_failed')
+        """,
+        (utc_now(), project_id, draft_uid),
     )
 
 

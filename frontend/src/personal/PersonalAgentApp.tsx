@@ -351,7 +351,12 @@ export function PersonalAgentApp() {
         }}
         width={860}
       >
-        <ArtifactDraftsPanel openDraftUid={draftToOpenUid} activeTab={draftPanelTab} onTabChange={setDraftPanelTab} />
+        <ArtifactDraftsPanel
+          openDraftUid={draftToOpenUid}
+          activeTab={draftPanelTab}
+          onTabChange={setDraftPanelTab}
+          selectedSessionUid={selectedSessionUid}
+        />
       </Drawer>
       <Drawer title="知识库" open={knowledgeOpen} onClose={() => setKnowledgeOpen(false)} width={820}>
         <KnowledgePanel />
@@ -777,11 +782,13 @@ const contentFormatOptions = [
 function ArtifactDraftsPanel({
   openDraftUid,
   activeTab,
-  onTabChange
+  onTabChange,
+  selectedSessionUid
 }: {
   openDraftUid?: string;
   activeTab: "create" | "current";
   onTabChange: (value: "create" | "current") => void;
+  selectedSessionUid?: string;
 }) {
   const queryClient = useQueryClient();
   const [draftTitle, setDraftTitle] = useState("");
@@ -797,7 +804,11 @@ function ArtifactDraftsPanel({
   const [exportFormat, setExportFormat] = useState("");
   const [compareRevisionIndex, setCompareRevisionIndex] = useState<number>();
 
-  const draftsQuery = useQuery({ queryKey: ["personal-drafts"], queryFn: personalAgentApi.draftList, retry: false });
+  const draftsQuery = useQuery({
+    queryKey: ["personal-drafts", selectedSessionUid || ""],
+    queryFn: () => personalAgentApi.draftList(selectedSessionUid),
+    retry: false
+  });
   const sourcesQuery = useQuery({ queryKey: ["personal-sources"], queryFn: personalAgentApi.sources, retry: false });
   const drafts = draftsQuery.data ?? [];
   const activeDraft = drafts.find((item) => item.is_active);

@@ -31,6 +31,13 @@ DOCUMENT_ARTIFACT_TYPES = {
 }
 
 CODE_LINKED_ARTIFACT_TYPES = {"c_code_diff", "unit_test_code_or_diff"}
+LINEAGE_PREDECESSOR_BY_DOCUMENT_TYPE = {
+    "requirement_breakdown": "requirement_analysis_report",
+    "functional_spec": "requirement_breakdown",
+    "detailed_design": "functional_spec",
+    "test_case_spec": "detailed_design",
+    "unit_test_code_or_diff": "test_case_spec",
+}
 
 
 class DocumentQualityError(ValueError):
@@ -56,7 +63,14 @@ def propose_personal_artifact(
     workspace_path = (workspace or db_path.parent).expanduser().resolve()
     ensure_default_document_skills(db_path, workspace=workspace_path, project_id=project_id)
     skill = load_skill_for_document_type(db_path, workspace=workspace_path, project_id=project_id, document_type=document_type)
-    context = _generation_context(db_path, project_id=project_id, prompt=prompt, source_uids=source_uids, session_task_uid=session_task_uid, document_type=document_type)
+    context = _generation_context(
+        db_path,
+        project_id=project_id,
+        prompt=prompt,
+        source_uids=source_uids,
+        session_task_uid=session_uid or session_task_uid,
+        document_type=document_type,
+    )
     template = load_default_template(workspace=workspace_path, skill=skill)
     context["template"] = {**template.metadata(), "content": template.content}
     generated = generate_artifact_with_skill(db_path, project_id=project_id, document_type=document_type, skill=skill, context=context)
@@ -90,6 +104,7 @@ def propose_personal_artifact(
         content_format=generated["content_format"],
         source_uid=context["source_uids"][0] if context["source_uids"] else "",
         session_uid=session_uid or session_task_uid,
+        derived_from_draft_uid=str((context.get("upstream_drafts") or [{}])[0].get("draft_uid") or ""),
         metadata={
             "generation": {
                 "phase": "skill_llm_document_generation",
@@ -177,7 +192,7 @@ def revise_personal_artifact(
         project_id=project_id,
         prompt=feedback,
         source_uids=source_uids,
-        session_task_uid=session_task_uid,
+        session_task_uid=session_uid or session_task_uid,
         document_type=document_type,
     )
     if isinstance(current_generation, dict):
@@ -331,7 +346,13 @@ def propose_personal_unit_test_code(
     session_uid: str = "",
     make_active: bool = True,
 ) -> dict[str, Any]:
-    context = _generation_context(db_path, project_id=project_id, prompt=prompt, source_uids=source_uids, session_task_uid=session_task_uid)
+    context = _generation_context(
+        db_path,
+        project_id=project_id,
+        prompt=prompt,
+        source_uids=source_uids,
+        session_task_uid=session_uid or session_task_uid,
+    )
     content = _unit_test_code_or_diff(context)
     draft = create_artifact_draft(
         db_path,
@@ -342,6 +363,7 @@ def propose_personal_unit_test_code(
         content_format="diff",
         source_uid=context["source_uids"][0] if context["source_uids"] else "",
         session_uid=session_uid or session_task_uid,
+        derived_from_draft_uid=str((context.get("upstream_drafts") or [{}])[0].get("draft_uid") or ""),
         metadata={
             "generation": {
                 "phase": "phase5_unit_test_code_linkage",
@@ -454,6 +476,12 @@ def _generation_context(
         "session_memories": session_memories,
         "session_skill_update_candidates": session_skill_candidates,
         "source_semantic_model": source_semantic_model,
+        "upstream_drafts": _upstream_drafts(
+            db_path,
+            project_id=project_id,
+            session_uid=session_task_uid,
+            document_type=document_type,
+        ),
         "evidence_refs": {
             "active_source_uids": [item["source_uid"] for item in sources],
             "knowledge_item_uids": [item["item_uid"] for item in knowledge],
@@ -463,6 +491,36 @@ def _generation_context(
         },
         "impact": _detailed_design_impact(db_path, project_id, prompt) if document_type == "detailed_design" else {},
     }
+
+
+def _upstream_drafts(db_path: Path, *, project_id: int, session_uid: str, document_type: str) -> list[dict[str, Any]]:
+    upstream_type = LINEAGE_PREDECESSOR_BY_DOCUMENT_TYPE.get(document_type)
+    if not upstream_type:
+        return []
+    with connect(db_path) as conn:
+        if session_uid:
+            row = conn.execute(
+                """
+                SELECT draft_uid, document_type, title, current_revision, updated_at
+                FROM personal_drafts
+                WHERE project_id=? AND session_uid=? AND document_type=? AND status='active' AND is_active=1
+                ORDER BY updated_at DESC, id DESC LIMIT 1
+                """,
+                (project_id, session_uid, upstream_type),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT draft_uid, document_type, title, current_revision, updated_at
+                FROM personal_drafts
+                WHERE project_id=? AND session_uid='' AND document_type=? AND status='active' AND is_active=1
+                ORDER BY updated_at DESC, id DESC LIMIT 1
+                """,
+                (project_id, upstream_type),
+            ).fetchone()
+    if row is None:
+        return []
+    return [dict(row)]
 
 
 def _record_quality_failure_skill_candidate(

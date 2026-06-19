@@ -1191,6 +1191,71 @@ def test_directional_revision_quality_failure_creates_no_revision(tmp_path: Path
         assert conn.execute("SELECT COUNT(*) FROM personal_draft_revisions WHERE draft_uid=?", (draft_uid,)).fetchone()[0] == 2
 
 
+def test_lineage_uses_active_upstream_and_excludes_quality_failed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+    session_uid = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()["session"]["session_uid"]
+
+    requirement = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "requirement_analysis_report", "session_uid": session_uid, "title": "需求分析", "content": "# 需求分析"},
+    ).json()
+    created_failed = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "requirement_breakdown", "session_uid": session_uid, "title": "旧拆解", "content": "# 旧拆解"},
+    ).json()
+    client.post(
+        f"/api/personal/drafts/{created_failed['draft_uid']}/revise-manual",
+        json={"content": "# 旧拆解失败", "make_active": True, "metadata": {"m": 1}},
+    )
+    with connect(db_path) as conn:
+        conn.execute("UPDATE personal_drafts SET status='quality_failed', is_active=0 WHERE draft_uid=?", (created_failed["draft_uid"],))
+
+    breakdown = client.post(
+        "/api/personal/documents/propose",
+        json={"prompt": "生成需求拆解", "document_type": "requirement_breakdown", "session_uid": session_uid},
+    )
+    assert breakdown.status_code == 200, breakdown.json()
+    breakdown_payload = breakdown.json()
+    assert breakdown_payload["derived_from_draft_uid"] == requirement["draft_uid"]
+    upstream = breakdown_payload["metadata"]["generation"]["evidence_refs"]
+    assert requirement["draft_uid"] == breakdown_payload["derived_from_draft_uid"]
+    assert upstream["active_source_uids"] == []
+
+
+def test_reactivating_upstream_marks_downstream_lineage_stale(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+    first_turn = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()
+    session_uid = first_turn["session"]["session_uid"]
+
+    requirement = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "requirement_analysis_report", "session_uid": session_uid, "title": "需求", "content": "# 需求"},
+    ).json()
+    breakdown = client.post(
+        "/api/personal/documents/propose",
+        json={"prompt": "生成需求拆解", "document_type": "requirement_breakdown", "session_uid": session_uid},
+    ).json()
+    assert breakdown["derived_from_draft_uid"] == requirement["draft_uid"]
+    assert breakdown["lineage_stale"] is False
+
+    revised = client.post(
+        f"/api/personal/drafts/{requirement['draft_uid']}/revise-manual",
+        json={"content": "# 需求 v2", "make_active": True},
+    )
+    assert revised.status_code == 200
+
+    refreshed = client.get(f"/api/personal/drafts/{breakdown['draft_uid']}").json()
+    assert refreshed["lineage_stale"] is True
+
+
 def test_document_generation_requires_configured_llm_and_creates_no_draft(tmp_path: Path, monkeypatch) -> None:
     for key in [
         "PERSONAL_AGENT_LLM_PROVIDER",

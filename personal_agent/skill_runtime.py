@@ -179,6 +179,7 @@ def _user_prompt(*, document_type: str, content_format: str, skill: dict[str, An
             }
             for item in (context.get("session_skill_update_candidates") or [])[:5]
         ],
+        "upstream_drafts": context.get("upstream_drafts") or [],
         "evidence_refs": context.get("evidence_refs") or {},
         "code_impact": context.get("impact") or {},
         "hard_boundaries": {
@@ -268,6 +269,7 @@ def _revision_user_prompt(
             }
             for item in (context.get("session_skill_update_candidates") or [])[:5]
         ],
+        "upstream_drafts": context.get("upstream_drafts") or [],
         "evidence_refs": context.get("evidence_refs") or {},
         "code_impact": context.get("impact") or {},
         "hard_boundaries": {
