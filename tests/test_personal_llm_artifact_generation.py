@@ -1256,6 +1256,36 @@ def test_reactivating_upstream_marks_downstream_lineage_stale(tmp_path: Path, mo
     assert refreshed["lineage_stale"] is True
 
 
+def test_regenerating_upstream_marks_downstream_lineage_stale(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+    first_turn = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()
+    session_uid = first_turn["session"]["session_uid"]
+
+    client.post(
+        "/api/personal/drafts",
+        json={"document_type": "requirement_analysis_report", "session_uid": session_uid, "title": "需求", "content": "# 需求"},
+    )
+    breakdown = client.post(
+        "/api/personal/documents/propose",
+        json={"prompt": "生成需求拆解", "document_type": "requirement_breakdown", "session_uid": session_uid},
+    ).json()
+    assert breakdown["lineage_stale"] is False
+
+    # Regenerating the upstream as a NEW draft (new draft_uid) can't be caught by the
+    # derived_from chain, so document-type-based propagation must still mark the downstream stale.
+    client.post(
+        "/api/personal/drafts",
+        json={"document_type": "requirement_analysis_report", "session_uid": session_uid, "title": "需求 v2", "content": "# 需求 v2"},
+    )
+
+    refreshed = client.get(f"/api/personal/drafts/{breakdown['draft_uid']}").json()
+    assert refreshed["lineage_stale"] is True
+
+
 def test_document_generation_requires_configured_llm_and_creates_no_draft(tmp_path: Path, monkeypatch) -> None:
     for key in [
         "PERSONAL_AGENT_LLM_PROVIDER",

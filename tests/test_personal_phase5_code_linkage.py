@@ -111,6 +111,74 @@ def test_personal_patch_propose_tool_chain_preserves_session_uid(tmp_path: Path,
     assert created.json()["session_uid"] == "session_tool_patch"
 
 
+def test_patch_propose_does_not_clear_other_session_active_drafts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client, _db_path, _repo, _test_command = _client_with_code_repo(tmp_path)
+
+    other = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "functional_spec", "session_uid": "session_other", "title": "功能规范", "content": "# 规范"},
+    ).json()
+    assert other["is_active"] is True
+
+    proposed = client.post(
+        "/api/personal/patch/propose",
+        json={
+            "change_text": "invalid speed should return default zero",
+            "session_uid": "session_tool_patch",
+            "target_symbol": "VehicleSpeed_Read",
+            "directives": [
+                {
+                    "file_path": "speed.c",
+                    "find": "        return -1;\n",
+                    "replace": "        return 0;\n",
+                    "description": "invalid speed default",
+                }
+            ],
+            "dry_run": False,
+        },
+    )
+    assert proposed.status_code == 200
+
+    # The patch proposal lives in session_tool_patch and must not deactivate the
+    # functional_spec that another session marked active (C2 cross-session isolation).
+    refreshed = client.get(f"/api/personal/drafts/{other['draft_uid']}").json()
+    assert refreshed["is_active"] is True
+
+
+def test_patch_propose_updates_session_active_draft_focus(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client, _db_path, _repo, _test_command = _client_with_code_repo(tmp_path)
+
+    session_uid = client.post("/api/personal/chat/turn", json={"content": "建立补丁会话"}).json()["session"]["session_uid"]
+
+    proposed = client.post(
+        "/api/personal/patch/propose",
+        json={
+            "change_text": "invalid speed should return default zero",
+            "session_uid": session_uid,
+            "target_symbol": "VehicleSpeed_Read",
+            "directives": [
+                {
+                    "file_path": "speed.c",
+                    "find": "        return -1;\n",
+                    "replace": "        return 0;\n",
+                    "description": "invalid speed default",
+                }
+            ],
+            "dry_run": False,
+        },
+    )
+    assert proposed.status_code == 200
+    patch_draft_uid = proposed.json()["output"]["artifact"]["draft_uid"]
+
+    # The newly created active patch draft must become the session's focused draft,
+    # consistent with every other make_active write path.
+    session_state = client.get(f"/api/personal/sessions/{session_uid}")
+    assert session_state.status_code == 200
+    assert session_state.json()["active_draft_uid"] == patch_draft_uid
+
+
 def test_personal_phase5_unit_test_code_draft_and_validation_allowlist(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
     client, _db_path, _repo, test_command = _client_with_code_repo(tmp_path)

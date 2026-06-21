@@ -21,6 +21,18 @@ DOCUMENT_TYPES = {
 
 CONTENT_FORMATS = {"markdown", "json_table", "diff", "text"}
 
+# Canonical document pipeline order (single source of truth). A document type's
+# downstream = everything after it in this tuple. artifact_generation derives its
+# predecessor map from this so lineage order is not duplicated across modules.
+DOCUMENT_LINEAGE_ORDER = (
+    "requirement_analysis_report",
+    "requirement_breakdown",
+    "functional_spec",
+    "detailed_design",
+    "test_case_spec",
+    "unit_test_code_or_diff",
+)
+
 
 def create_artifact_draft(
     db_path: Path,
@@ -95,6 +107,10 @@ def create_artifact_draft(
         )
         if make_active:
             _update_session_active_draft(conn, session_uid=session_uid, draft_uid=draft_uid)
+            # Regenerating an upstream document (new draft_uid, so the derived_from chain
+            # can't catch it) must still flag its downstream as stale. Match by document_type
+            # within the session rather than by derived_from.
+            _mark_session_downstream_stale(conn, project_id=project_id, session_uid=session_uid, document_type=document_type)
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
 
 
@@ -301,6 +317,29 @@ def _mark_downstream_lineage_stale(conn: Any, *, project_id: int, draft_uid: str
         WHERE project_id=? AND derived_from_draft_uid=? AND status IN ('active', 'quality_failed')
         """,
         (utc_now(), project_id, draft_uid),
+    )
+
+
+def _downstream_document_types(document_type: str) -> list[str]:
+    if document_type not in DOCUMENT_LINEAGE_ORDER:
+        return []
+    index = DOCUMENT_LINEAGE_ORDER.index(document_type)
+    return list(DOCUMENT_LINEAGE_ORDER[index + 1 :])
+
+
+def _mark_session_downstream_stale(conn: Any, *, project_id: int, session_uid: str, document_type: str) -> None:
+    downstream = _downstream_document_types(document_type)
+    if not session_uid or not downstream:
+        return
+    placeholders = ",".join("?" for _ in downstream)
+    conn.execute(
+        f"""
+        UPDATE personal_drafts
+        SET lineage_stale=1, updated_at=?
+        WHERE project_id=? AND session_uid=? AND document_type IN ({placeholders})
+          AND status IN ('active', 'quality_failed')
+        """,
+        (utc_now(), project_id, session_uid, *downstream),
     )
 
 

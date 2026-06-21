@@ -217,12 +217,19 @@ def _write_candidate_patch_artifact(db_path: Path, request: ChangeRequest, patch
         }
     }
     with connect(db_path) as conn:
-        conn.execute(
-            """
-            UPDATE personal_drafts SET is_active=0 WHERE project_id=?
-            """,
-            (request.project_id,),
-        )
+        # Scope the active-draft reset to this session's c_code_diff drafts so a patch
+        # proposal in one session no longer clears every session's active document set
+        # (mirrors artifact_drafts._clear_active_scope; empty session falls back to legacy global).
+        if request.session_uid:
+            conn.execute(
+                "UPDATE personal_drafts SET is_active=0 WHERE project_id=? AND session_uid=? AND document_type='c_code_diff'",
+                (request.project_id, request.session_uid),
+            )
+        else:
+            conn.execute(
+                "UPDATE personal_drafts SET is_active=0 WHERE project_id=?",
+                (request.project_id,),
+            )
         conn.execute(
             """
             INSERT INTO personal_drafts(
@@ -241,6 +248,18 @@ def _write_candidate_patch_artifact(db_path: Path, request: ChangeRequest, patch
                 now,
             ),
         )
+        # Mirror artifact_drafts._update_session_active_draft so the just-created active
+        # patch draft also becomes the session's focused draft (cannot import the helper
+        # from this core layer, so inline it). Empty session falls through unchanged.
+        if request.session_uid:
+            conn.execute(
+                """
+                UPDATE personal_sessions
+                SET active_draft_uid=?, updated_at=?
+                WHERE session_uid=? AND status='active'
+                """,
+                (draft_uid, now, request.session_uid),
+            )
         conn.execute(
             """
             INSERT INTO personal_draft_revisions(

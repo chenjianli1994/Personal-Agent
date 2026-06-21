@@ -308,7 +308,7 @@ class PersonalRuntime:
                 "injected_memory_item_uids": llm["injected_memory_item_uids"],
                 "billable_memory_item_uids": billable_memory_uids,
                 "memory_item_uids_used": llm["memory_item_uids_used"],
-                "recall_provenance": _recall_provenance(context),
+                "recall_provenance": _recall_provenance(context, llm["injected_knowledge_item_uids"], llm["injected_memory_item_uids"]),
             }
             message = self._append_message(
                 session_uid,
@@ -685,13 +685,25 @@ def _valid_used_uids(value: Any, allowed_uids: list[str]) -> list[str]:
     return result
 
 
-def _recall_provenance(context: dict[str, Any]) -> list[dict[str, str]]:
+def _recall_provenance(
+    context: dict[str, Any],
+    injected_knowledge_uids: list[str],
+    injected_memory_uids: list[str],
+) -> list[dict[str, str]]:
+    # Only surface items that were actually injected into the prompt, not everything
+    # recalled — the prompt injects at most the top few of each kind after safety filtering,
+    # so listing the full recall set would overstate what the answer relied on.
+    knowledge_allowed = {str(uid) for uid in (injected_knowledge_uids or [])}
+    memory_allowed = {str(uid) for uid in (injected_memory_uids or [])}
     provenance: list[dict[str, str]] = []
-    for kind, items in (("knowledge", context.get("knowledge") or []), ("memory", context.get("memories") or [])):
-        for item in items[:10]:
+    for kind, items, allowed in (
+        ("knowledge", context.get("knowledge") or [], knowledge_allowed),
+        ("memory", context.get("memories") or [], memory_allowed),
+    ):
+        for item in items:
             uid = str(item.get("item_uid") or "").strip()
             title = str(item.get("title") or "").strip()
-            if uid:
+            if uid and uid in allowed:
                 provenance.append({"uid": uid, "title": title, "kind": kind})
     return provenance
 

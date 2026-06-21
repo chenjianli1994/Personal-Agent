@@ -11,7 +11,7 @@ from personal_agent.core.utils import json_dumps
 
 from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .artifact_quality import validate_generated_artifact
-from .artifact_drafts import create_artifact_draft, get_artifact_draft, revise_artifact_draft_manual
+from .artifact_drafts import DOCUMENT_LINEAGE_ORDER, create_artifact_draft, get_artifact_draft, revise_artifact_draft_manual
 from .knowledge_recall import billable_memory_item_uids, recall_knowledge, record_recall_feedback, safe_recall_prompt_item
 from .knowledge_learning import pending_session_memory_candidates
 from .source_semantic_model import build_source_semantic_model
@@ -31,12 +31,10 @@ DOCUMENT_ARTIFACT_TYPES = {
 }
 
 CODE_LINKED_ARTIFACT_TYPES = {"c_code_diff", "unit_test_code_or_diff"}
+# Derived from the canonical pipeline order in artifact_drafts (single source of truth).
 LINEAGE_PREDECESSOR_BY_DOCUMENT_TYPE = {
-    "requirement_breakdown": "requirement_analysis_report",
-    "functional_spec": "requirement_breakdown",
-    "detailed_design": "functional_spec",
-    "test_case_spec": "detailed_design",
-    "unit_test_code_or_diff": "test_case_spec",
+    DOCUMENT_LINEAGE_ORDER[index]: DOCUMENT_LINEAGE_ORDER[index - 1]
+    for index in range(1, len(DOCUMENT_LINEAGE_ORDER))
 }
 IMPACT_ENABLED_DOCUMENT_TYPES = {"detailed_design", "test_case_spec", "unit_test_code_or_diff"}
 
