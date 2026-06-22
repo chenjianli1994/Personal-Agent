@@ -304,6 +304,8 @@ def test_personal_document_generation_uses_llm_route_and_skill_generation(tmp_pa
     assert route["intent"] == "generate_document"
     assert route["target_document_type"] == "requirement_analysis_report"
     assert message["metadata"]["draft"]["document_type"] == "requirement_analysis_report"
+    assert message["metadata"]["draft"]["draft_uid"]
+    assert "draft_uid" not in message["content"]
 
     with connect(db_path) as conn:
         purposes = [
@@ -414,6 +416,7 @@ def test_chat_document_quality_failure_returns_failed_draft_and_skill_candidate(
     assert draft["generation"]["quality"]["passed"] is False
     assert "required_sections" in draft["generation"]["quality"]["blocking_failures"][0]
     assert "质量门未通过" in message["content"]
+    assert "draft_uid" not in message["content"]
     with connect(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0] == 1
         candidate = conn.execute("SELECT * FROM personal_skill_update_candidates ORDER BY id DESC LIMIT 1").fetchone()
@@ -516,6 +519,7 @@ def test_active_draft_can_be_revised_via_llm_route(tmp_path: Path, monkeypatch) 
     assert route["intent"] == "revise_draft"
     assert message["metadata"]["draft"]["draft_uid"] == draft_uid
     assert message["metadata"]["draft"]["current_revision"] == 2
+    assert "draft_uid" not in message["content"]
 
 
 def test_active_draft_is_not_reused_across_sessions(tmp_path: Path, monkeypatch) -> None:

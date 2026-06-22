@@ -96,3 +96,33 @@ def test_personal_table_and_patch_artifacts_export_xlsx_and_diff(tmp_path: Path,
 
     unsupported = client.post(f"/api/personal/artifacts/{patch['draft_uid']}/export", json={"format": "docx"})
     assert unsupported.status_code == 400
+
+
+def test_personal_artifact_open_exports_and_launches_default_app(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    opened: list[Path] = []
+    monkeypatch.setattr("personal_agent.artifact_export._open_with_default_app", lambda path: opened.append(path))
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    draft = client.post(
+        "/api/personal/artifacts/drafts",
+        json={
+            "artifact_type": "requirement_analysis_report",
+            "title": "可打开草稿",
+            "content": "# 可打开草稿\n\n当前内容",
+            "content_format": "markdown",
+        },
+    ).json()
+
+    response = client.post(f"/api/personal/artifacts/{draft['draft_uid']}/open", json={"format": "md"})
+
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    assert payload["status"] == "opened"
+    file_path = Path(payload["file_path"])
+    assert file_path.exists()
+    assert opened == [file_path]
+    assert file_path.read_text(encoding="utf-8") == "# 可打开草稿\n\n当前内容"

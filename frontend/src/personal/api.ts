@@ -105,6 +105,8 @@ export const personalAgentApi = {
     apiPost<undefined, PersonalArtifactDraft>(`/api/personal/drafts/${encodeURIComponent(draftUid)}/activate`),
   exportDraft: (draftUid: string, body: PersonalArtifactExportInput) =>
     apiPost<PersonalArtifactExportInput, PersonalArtifactExport>(`/api/personal/drafts/${encodeURIComponent(draftUid)}/export`, body),
+  openDraft: (draftUid: string, body: PersonalArtifactExportInput = {}) =>
+    apiPost<PersonalArtifactExportInput, PersonalArtifactExport>(`/api/personal/drafts/${encodeURIComponent(draftUid)}/open`, body),
   draftDownloadUrl: (draftUid: string, format?: string) =>
     params(`/api/personal/drafts/${encodeURIComponent(draftUid)}/download`, { format }),
   llmConfig: () => apiGet<PersonalLlmConfig>("/api/personal/llm-config"),

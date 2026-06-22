@@ -28,7 +28,7 @@ from .artifact_generation import (
     propose_personal_unit_test_code,
     revise_personal_artifact,
 )
-from .artifact_export import export_personal_artifact, resolve_personal_artifact_download
+from .artifact_export import export_personal_artifact, open_personal_artifact, resolve_personal_artifact_download
 from .bootstrap import PersonalAgentContext
 from .document_intent import document_type_from_text, looks_like_document_generation
 from .dev_tasks import DevTaskOrchestrator
@@ -780,6 +780,25 @@ def register_personal_agent_routes(
     @app.post("/api/personal/artifacts/{draft_uid}/export")
     def personal_artifact_export_alias(draft_uid: str, req: PersonalArtifactExportRequest) -> dict[str, Any]:
         return personal_artifact_export(draft_uid, req)
+
+    @app.post("/api/personal/drafts/{draft_uid}/open")
+    def personal_artifact_open(draft_uid: str, req: PersonalArtifactExportRequest) -> dict[str, Any]:
+        _require_capability(context, "artifact_export")
+        try:
+            return open_personal_artifact(
+                context.db_path,
+                workspace=context.workspace,
+                project_id=context.project_id,
+                draft_uid=draft_uid,
+                export_format=req.format,
+                revision_index=req.revision_index,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400 if "not supported" in str(exc) else 404 if "not found" in str(exc) else 400, detail=str(exc)) from exc
+
+    @app.post("/api/personal/artifacts/{draft_uid}/open")
+    def personal_artifact_open_alias(draft_uid: str, req: PersonalArtifactExportRequest) -> dict[str, Any]:
+        return personal_artifact_open(draft_uid, req)
 
     @app.get("/api/personal/drafts/{draft_uid}/download")
     def personal_artifact_download(draft_uid: str, format: str = "") -> FileResponse:

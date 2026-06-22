@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +58,30 @@ def export_personal_artifact(
     return exported
 
 
+def open_personal_artifact(
+    db_path: Path,
+    *,
+    workspace: Path,
+    project_id: int,
+    draft_uid: str,
+    export_format: str = "",
+    revision_index: int | None = None,
+) -> dict[str, Any]:
+    exported = export_personal_artifact(
+        db_path,
+        workspace=workspace,
+        project_id=project_id,
+        draft_uid=draft_uid,
+        export_format=export_format,
+        revision_index=revision_index,
+    )
+    try:
+        _open_with_default_app(Path(exported["file_path"]))
+    except OSError as exc:
+        raise ValueError(f"failed to open exported draft with default app: {exc}") from exc
+    return {**exported, "status": "opened"}
+
+
 def resolve_personal_artifact_download(
     db_path: Path,
     *,
@@ -81,6 +108,18 @@ def resolve_personal_artifact_download(
         "diff": "text/x-diff; charset=utf-8",
     }[resolved_format]
     return {"file_path": str(file_path), "file_name": file_path.name, "media_type": media_type, "export_format": resolved_format}
+
+
+def _open_with_default_app(path: Path) -> None:
+    resolved = path.expanduser().resolve()
+    system = platform.system().lower()
+    if system == "windows":
+        os.startfile(str(resolved))  # type: ignore[attr-defined]
+        return
+    if system == "darwin":
+        subprocess.Popen(["open", str(resolved)])
+        return
+    subprocess.Popen(["xdg-open", str(resolved)])
 
 
 def _resolve_export_format(content: dict[str, Any], requested: str) -> str:

@@ -58,6 +58,7 @@ export function ChatPanel({
   onOpenLlmSettings,
   onOpenSources,
   onOpenDrafts,
+  onOpenDraftFile,
   onOpenKnowledge,
   onOpenLearning,
   onOpenCodebase,
@@ -82,6 +83,7 @@ export function ChatPanel({
   onOpenLlmSettings: () => void;
   onOpenSources: () => void;
   onOpenDrafts: (draftUid?: string) => void;
+  onOpenDraftFile: (draftUid: string) => void;
   onOpenKnowledge: () => void;
   onOpenLearning: () => void;
   onOpenCodebase: () => void;
@@ -153,7 +155,13 @@ export function ChatPanel({
         {!messages.length ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="输入问题或任务，Agent 会给出回答。" />
         ) : (
-          messages.map((item, index) => <Bubble key={`${item.role}-${item.created_at || index}-${index}`} item={item} onOpenDrafts={onOpenDrafts} />)
+          messages.map((item, index) => (
+            <Bubble
+              key={`${item.role}-${item.created_at || index}-${index}`}
+              item={item}
+              onOpenDraftFile={onOpenDraftFile}
+            />
+          ))
         )}
       </div>
       {localError ? (
@@ -282,7 +290,7 @@ function LlmBadge({ status }: { status?: AgentLlmStatus }) {
   return <Tag color={isReal ? "green" : "red"}>{text}</Tag>;
 }
 
-function Bubble({ item, onOpenDrafts }: { item: LocalMessage; onOpenDrafts: (draftUid?: string) => void }) {
+function Bubble({ item, onOpenDraftFile }: { item: LocalMessage; onOpenDraftFile: (draftUid: string) => void }) {
   const isUser = item.role === "user";
   const draft = asRecord(item.metadata?.draft);
   const draftUid = typeof draft.draft_uid === "string" ? draft.draft_uid : "";
@@ -306,7 +314,7 @@ function Bubble({ item, onOpenDrafts }: { item: LocalMessage; onOpenDrafts: (dra
             ))}
           </div>
         ) : null}
-        <div className="personal-bubble-content">{item.content}</div>
+        <div className="personal-bubble-content">{displayMessageContent(item.content, isUser)}</div>
         {!isUser && provenance.length ? (
           <div className="message-attachments">
             {provenance.map((entry) => (
@@ -321,8 +329,8 @@ function Bubble({ item, onOpenDrafts }: { item: LocalMessage; onOpenDrafts: (dra
           </div>
         ) : null}
         {!isUser && draftUid ? (
-          <Button size="small" icon={<FileDoneOutlined />} className="bubble-draft-link" onClick={() => onOpenDrafts(draftUid)}>
-            打开 draft {shortId(draftUid)}
+          <Button size="small" icon={<FileDoneOutlined />} className="bubble-draft-link" onClick={() => onOpenDraftFile(draftUid)}>
+            打开草稿
           </Button>
         ) : null}
       </div>
@@ -354,8 +362,11 @@ function recallProvenance(value: unknown): PersonalRecallProvenance[] {
     .filter((item) => item.uid);
 }
 
-function shortId(value: string) {
-  return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
+function displayMessageContent(content: string, isUser: boolean) {
+  if (isUser) return content;
+  return content
+    .replace(/[，,]\s*draft_uid=[A-Za-z0-9_-]+(?=[。.,，\s]|$)/g, "")
+    .replace(/\s+([。.,，])/g, "$1");
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

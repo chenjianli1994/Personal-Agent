@@ -391,7 +391,7 @@ class PersonalRuntime:
             session_task_uid=session_uid,
             make_active=True,
         )
-        answer = f"已根据反馈修订《{draft['title']}》草稿 v{draft['current_revision']}，draft_uid={draft['draft_uid']}。"
+        answer = f"已根据反馈修订《{draft['title']}》草稿 v{draft['current_revision']}。"
         return self._append_message(session_uid, "assistant", answer, {"context": "draft_revision", "draft": draft, "intent_route": _intent_metadata(route)})
 
     def _learn_feedback_turn(self, *, session_uid: str, prompt: str, route: dict[str, Any], reflection: dict[str, Any]) -> dict[str, Any]:
@@ -850,10 +850,10 @@ def _draft_generation_answer(draft: dict[str, Any]) -> str:
         failures = quality.get("blocking_failures") if isinstance(quality.get("blocking_failures"), list) else []
         first_failure = str(failures[0]) if failures else "质量门未通过"
         return (
-            f"已生成《{draft['title']}》待修复草稿 v{draft['current_revision']}，draft_uid={draft['draft_uid']}。"
+            f"已生成《{draft['title']}》待修复草稿 v{draft['current_revision']}。"
             f"质量门未通过：{first_failure}。草稿已保留，可在 draft 面板查看质量项后修订或重新生成。"
         )
-    return f"已生成《{draft['title']}》草稿 v{draft['current_revision']}，draft_uid={draft['draft_uid']}。"
+    return f"已生成《{draft['title']}》草稿 v{draft['current_revision']}。"
 
 
 def _llm_error_notice(route: dict[str, Any]) -> str:

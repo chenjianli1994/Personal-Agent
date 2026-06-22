@@ -117,6 +117,13 @@ export function PersonalAgentApp() {
       setOptimistic((items) => items.map((item) => (item.pending ? { ...item, content: `发送失败：${text}`, pending: false } : item)));
     }
   });
+  const openDraftFile = useMutation({
+    mutationFn: (draftUid: string) => personalAgentApi.openDraft(draftUid, {}),
+    onSuccess: (result) => {
+      message.success(`已打开 ${result.file_name}。`);
+    },
+    onError: showMutationError
+  });
 
   const renameSession = useMutation({
     mutationFn: ({ sessionUid, title }: { sessionUid: string; title: string }) => personalAgentApi.renameSession(sessionUid, { title }),
@@ -334,6 +341,7 @@ export function PersonalAgentApp() {
             setDraftPanelTab("current");
             setDraftsOpen(true);
           }}
+          onOpenDraftFile={(draftUid) => openDraftFile.mutate(draftUid)}
           onOpenKnowledge={() => setKnowledgeOpen(true)}
           onOpenLearning={() => setLearningOpen(true)}
           onOpenCodebase={() => setCodebaseOpen(true)}
