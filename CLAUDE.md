@@ -10,7 +10,7 @@ PersonalAgent is a self-contained, single-user local assistant.
 - Frontend: `frontend/`, React + Vite.
 - Storage: local SQLite, usually `.personal_agent/agent.db`.
 - Primary language for user-facing text: Chinese.
-- Tests run offline by default through the fake LLM provider.
+- Tests run offline through an explicit internal LLM fixture; product runtime defaults to DeepSeek.
 
 Read these first in a new session:
 
@@ -33,10 +33,10 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Run backend with the local fake provider:
+Run backend with the default DeepSeek provider:
 
 ```powershell
-.\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870 --fake-llm
+.\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870
 ```
 
 Frontend:
@@ -70,7 +70,7 @@ Important modules:
 - `artifact_generation.py` / `artifact_drafts.py` / `artifact_quality.py`: draft generation, revisions, and quality checks.
 - `knowledge_learning.py` / `learning_reflector.py` / `skill_reflector.py`: governed learning and skill update candidates.
 - `core/llm_gateway.py`: all model calls go through `PersonalLLMGateway`.
-- `core/fake_llm_provider.py`: deterministic local fixture for tests and offline smoke runs.
+- `core/fake_llm_provider.py`: deterministic internal fixture for tests.
 - `core/database.py`: single DB schema and compatibility migrations.
 - `core/codebase/`: local code indexing, retrieval, impact analysis, candidate patch planning, and controlled validation.
 
@@ -103,3 +103,8 @@ Do not commit local runtime or dependency files:
 - Use `apply_patch` for manual edits.
 - Run `pytest -q` and `npm run typecheck` before claiming a cross-module change is complete.
 - For code review requests, lead with findings and file references.
+
+##基本要求
+- 默认使用中文回答，包括思考过程、文档书写、提交说明
+- 默认不主动提交gh，除非我主动说明需要提交
+- 提交gh时提交说明需要填写，罗列更改的内容点

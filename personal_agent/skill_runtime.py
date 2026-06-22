@@ -33,7 +33,7 @@ def generate_artifact_with_skill(
         )
     except getattr(llm_gateway_module, "PersonalLLM" + "Error") as exc:
         if exc.code == "LLM_NOT_CONFIGURED":
-            raise ValueError(f"LLM 未配置，无法生成文档；请先配置真实 LLM 或在测试中显式启用 fake provider。{exc}") from exc
+            raise ValueError(f"LLM 未配置，无法生成文档；请先配置 DeepSeek API Key。{exc}") from exc
         raise ValueError(f"LLM 文档生成失败：{exc}") from exc
 
     parsed = result.parsed
@@ -89,7 +89,7 @@ def revise_artifact_with_skill(
         )
     except getattr(llm_gateway_module, "PersonalLLM" + "Error") as exc:
         if exc.code == "LLM_NOT_CONFIGURED":
-            raise ValueError(f"LLM 未配置，无法修订文档；请先配置真实 LLM 或在测试中显式启用 fake provider。{exc}") from exc
+            raise ValueError(f"LLM 未配置，无法修订文档；请先配置 DeepSeek API Key。{exc}") from exc
         raise ValueError(f"LLM 文档修订失败：{exc}") from exc
 
     parsed = result.parsed

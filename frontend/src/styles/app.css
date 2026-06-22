@@ -939,11 +939,6 @@ body {
   background: #f7fbf6;
 }
 
-.agent-llm-status.fake {
-  border-color: #f2d6a3;
-  background: #fffaf0;
-}
-
 .agent-governance-strip {
   display: flex;
   flex-wrap: wrap;
@@ -977,10 +972,6 @@ body {
 
 .agent-llm-status .anticon {
   color: #2f6f4f;
-}
-
-.agent-llm-status.fake .anticon {
-  color: #a76500;
 }
 
 .agent-llm-provider {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -337,10 +338,14 @@ def test_chat_and_unified_turn_document_generation_are_equivalent(tmp_path: Path
     chat_message = chat.json()["message"]
     unified_payload = unified.json()
     assert chat_message["metadata"]["intent_route"]["intent"] == "generate_document"
-    assert chat_message["metadata"]["draft"]["document_type"] == "detailed_design"
+    assert chat_message["metadata"]["context"] == "dev_task_start"
+    assert chat_message["metadata"]["dev_task"]["task_uid"].startswith("task_")
+    assert chat_message["metadata"]["draft"]["document_type"] == "requirement_analysis_report"
     assert unified_payload["mode"] == "personal_phase4_artifact"
     assert unified_payload["metadata"]["personal_intent"]["intent"] == "generate_document"
-    assert unified_payload["message"]["metadata"]["draft"]["document_type"] == "detailed_design"
+    assert unified_payload["message"]["metadata"]["context"] == "dev_task_start"
+    assert unified_payload["message"]["metadata"]["dev_task"]["task_uid"].startswith("task_")
+    assert unified_payload["message"]["metadata"]["draft"]["document_type"] == "requirement_analysis_report"
     assert unified_payload["metadata"]["personal_intent"]["created_draft_uids"] == [
         unified_payload["message"]["metadata"]["draft"]["draft_uid"]
     ]
@@ -421,7 +426,7 @@ def test_chat_document_quality_failure_returns_failed_draft_and_skill_candidate(
         assert conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0] == 1
         candidate = conn.execute("SELECT * FROM personal_skill_update_candidates ORDER BY id DESC LIMIT 1").fetchone()
     assert candidate is not None
-    assert candidate["target_skill"] == "functional-spec"
+    assert candidate["target_skill"] == "requirement-analysis-report"
     assert candidate["source"] == "quality_check_failure"
 
 
@@ -520,6 +525,99 @@ def test_active_draft_can_be_revised_via_llm_route(tmp_path: Path, monkeypatch) 
     assert message["metadata"]["draft"]["draft_uid"] == draft_uid
     assert message["metadata"]["draft"]["current_revision"] == 2
     assert "draft_uid" not in message["content"]
+
+
+def test_llm_route_target_revision_revises_from_requested_base_version(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    source = _add_source(client)
+    session = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()["session"]
+    session_uid = session["session_uid"]
+    created = client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "requirement_analysis_report",
+            "session_uid": session_uid,
+            "source_uid": source["source_uid"],
+            "title": "需求分析报告（水泵占空比计算）",
+            "content": "# 需求分析报告\n\n## 输入摘要\nBASE V1\n\n## 需求理解\nBASE V1\n\n## 证据引用\n- source: current_prompt\n\n## 边界与假设\n- 待确认。\n\n## 风险点\n- 待确认。\n\n## 待确认问题\n- 待确认。",
+        },
+    )
+    assert created.status_code == 200, created.text
+    draft_uid = created.json()["draft_uid"]
+    for marker in ["BASE V2", "BASE V3", "LATEST V4"]:
+        revised = client.post(
+            f"/api/personal/drafts/{draft_uid}/revise-manual",
+            json={
+                "content": f"# 需求分析报告\n\n## 输入摘要\n{marker}\n\n## 需求理解\n{marker}\n\n## 证据引用\n- source: current_prompt\n\n## 边界与假设\n- 待确认。\n\n## 风险点\n- 待确认。\n\n## 待确认问题\n- 待确认。",
+                "make_active": True,
+            },
+        )
+        assert revised.status_code == 200, revised.text
+
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_intent_route":
+            return LLMResult(
+                call_id=930,
+                provider="deepseek-test",
+                model="router",
+                status="ok",
+                parsed={
+                    "intent": "revise_draft",
+                    "confidence": 0.96,
+                    "target_document_type": "",
+                    "requires_active_source": False,
+                    "requires_active_draft": True,
+                    "requires_codebase": False,
+                    "creates_draft": False,
+                    "revises_draft": True,
+                    "writes_project_files": False,
+                    "requires_user_confirmation": False,
+                    "answer_mode": "general_chat",
+                    "target_draft_revision": 3,
+                    "reason": "LLM understood that the user wants to revise from v3.",
+                },
+                raw_text="{}",
+            )
+        if purpose == "personal_artifact_revise":
+            payload = json.loads(user_prompt)
+            current = payload["current_draft"]
+            assert current["current_revision"] == 3
+            assert "BASE V3" in current["content"]
+            assert "LATEST V4" not in current["content"]
+            return LLMResult(
+                call_id=931,
+                provider="deepseek-test",
+                model="revision",
+                status="ok",
+                parsed={
+                    "title": "需求分析报告（水泵占空比计算）",
+                    "content_format": "markdown",
+                    "content": "# 需求分析报告\n\n## 输入摘要\n基于 V3 重新修订。\n\n## 需求理解\n沿用 BASE V3 的基底。\n\n## 证据引用\n- source: current_prompt\n\n## 边界与假设\n- 待确认。\n\n## 风险点\n- 待确认。\n\n## 待确认问题\n- 待确认。",
+                    "memory_item_uids_used": [],
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post(
+        "/api/personal/chat/turn",
+        json={
+            "session_uid": session_uid,
+            "content": "有点错误了，你要在V3版本上进行更改，而不是在最新版本上，重新生成一版吧",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    message = response.json()["message"]
+    assert message["metadata"]["intent_route"]["target_draft_revision"] == 3
+    assert message["metadata"]["revision_target"]["base_revision_index"] == 3
+    assert message["metadata"]["draft"]["draft_uid"] == draft_uid
+    assert message["metadata"]["draft"]["current_revision"] == 5
+    assert "基于《需求分析报告（水泵占空比计算）》v3" in message["content"]
 
 
 def test_active_draft_is_not_reused_across_sessions(tmp_path: Path, monkeypatch) -> None:

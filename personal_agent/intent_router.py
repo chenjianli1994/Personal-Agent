@@ -129,7 +129,6 @@ def _promote_draft_revision_followup(route: dict[str, Any], context: dict[str, A
     )
     return promoted
 
-
 def _router_payload(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "user_message": context.get("prompt") or "",
@@ -158,6 +157,7 @@ def _router_payload(context: dict[str, Any]) -> dict[str, Any]:
             "writes_project_files": False,
             "requires_user_confirmation": False,
             "answer_mode": "general_chat | input_source_analysis | tool_guidance",
+            "target_draft_revision": 0,
             "reason": "Chinese reason",
         },
     }
@@ -185,6 +185,7 @@ def _coerce_route(parsed: dict[str, Any]) -> dict[str, Any]:
         "writes_project_files": bool(parsed.get("writes_project_files")),
         "requires_user_confirmation": bool(parsed.get("requires_user_confirmation")),
         "answer_mode": answer_mode,
+        "target_draft_revision": _positive_int(parsed.get("target_draft_revision")),
         "reason": str(parsed.get("reason") or "").strip(),
     }
 
@@ -212,6 +213,7 @@ def _fallback_route(error: str, llm_metadata: dict[str, Any] | None = None) -> d
         "writes_project_files": False,
         "requires_user_confirmation": False,
         "answer_mode": "general_chat",
+        "target_draft_revision": 0,
         "reason": "LLM intent route failed; safe answer-only fallback.",
         "router_source": "fallback",
         "llm": llm,
@@ -245,6 +247,14 @@ def _failed_llm_call_metadata(db_path: Path, error: str) -> dict[str, Any]:
         "purpose": row["purpose"],
         "error": row["error"] or error,
     }
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return result if result > 0 else 0
 
 
 def _bounded_float(value: Any, default: float) -> float:

@@ -52,7 +52,6 @@ class PersonalLLMGateway:
             "provider": provider["name"],
             "model": provider["model"],
             "error": error,
-            "fake_provider": provider["name"] == "fake",
             "configured_source": self._provider_config_source(provider["name"]),
             "last_health_check_at": utc_now(),
             "last_call": last_call,
@@ -116,48 +115,49 @@ class PersonalLLMGateway:
     def _select_provider(self, purpose: str = "") -> dict[str, str]:
         provider_name = os.environ.get("PERSONAL_AGENT_LLM_PROVIDER", "").lower()
         if provider_name == "fake":
+            if os.environ.get("PERSONAL_AGENT_ENABLE_FAKE_LLM") != "1":
+                raise PersonalLLMError("LLM_NOT_CONFIGURED", "Fake LLM provider is disabled. Configure DeepSeek with DEEPSEEK_API_KEY.")
             return {"name": "fake", "model": "personal-fake-semantic-fixture", "api_key": "", "base_url": ""}
         model = self._select_model_for_purpose(purpose)
-        if provider_name == "deepseek" or (not provider_name and os.environ.get("DEEPSEEK_API_KEY")):
+        if not provider_name:
+            provider_name = "deepseek"
+        if provider_name == "deepseek":
             if not os.environ.get("DEEPSEEK_API_KEY"):
-                raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=deepseek requires DEEPSEEK_API_KEY.")
+                raise PersonalLLMError("LLM_NOT_CONFIGURED", "DeepSeek is the default LLM provider and requires DEEPSEEK_API_KEY.")
             return {
                 "name": "deepseek",
                 "api_key": os.environ["DEEPSEEK_API_KEY"],
                 "base_url": "https://api.deepseek.com/chat/completions",
                 "model": model or "deepseek-v4-flash",
             }
-        if provider_name == "dashscope" and not os.environ.get("DASHSCOPE_API_KEY"):
-            raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=dashscope requires DASHSCOPE_API_KEY.")
-        if provider_name == "openrouter" and not os.environ.get("OPENROUTER_API_KEY"):
-            raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=openrouter requires OPENROUTER_API_KEY.")
-        if provider_name == "xai" and not os.environ.get("XAI_API_KEY"):
-            raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=xai requires XAI_API_KEY.")
-        if os.environ.get("DASHSCOPE_API_KEY"):
+        if provider_name == "dashscope":
+            if not os.environ.get("DASHSCOPE_API_KEY"):
+                raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=dashscope requires DASHSCOPE_API_KEY.")
             return {
                 "name": "dashscope",
                 "api_key": os.environ["DASHSCOPE_API_KEY"],
                 "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                 "model": model or "qwen3-coder-plus",
             }
-        if os.environ.get("OPENROUTER_API_KEY"):
+        if provider_name == "openrouter":
+            if not os.environ.get("OPENROUTER_API_KEY"):
+                raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=openrouter requires OPENROUTER_API_KEY.")
             return {
                 "name": "openrouter",
                 "api_key": os.environ["OPENROUTER_API_KEY"],
                 "base_url": "https://openrouter.ai/api/v1/chat/completions",
                 "model": model or "openai/gpt-4o-mini",
             }
-        if os.environ.get("XAI_API_KEY"):
+        if provider_name == "xai":
+            if not os.environ.get("XAI_API_KEY"):
+                raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=xai requires XAI_API_KEY.")
             return {
                 "name": "xai",
                 "api_key": os.environ["XAI_API_KEY"],
                 "base_url": "https://api.x.ai/v1/chat/completions",
                 "model": model or "grok-3-mini",
             }
-        raise PersonalLLMError(
-            "LLM_NOT_CONFIGURED",
-            "No personal Agent LLM provider configured. Set DEEPSEEK_API_KEY, DASHSCOPE_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, or set PERSONAL_AGENT_LLM_PROVIDER=fake for local tests.",
-        )
+        raise PersonalLLMError("LLM_NOT_CONFIGURED", "Unsupported or unconfigured LLM provider. DeepSeek is the default; set DEEPSEEK_API_KEY.")
 
     def _select_model_for_purpose(self, purpose: str) -> str:
         default_model = os.environ.get("PERSONAL_AGENT_LLM_MODEL", "")

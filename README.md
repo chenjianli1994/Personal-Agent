@@ -18,7 +18,7 @@ python -m venv .venv
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870 --fake-llm
+.\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870
 ```
 
 ## 前端
@@ -34,7 +34,9 @@ npm run typecheck
 
 当前结果：
 
-- `.\.venv\Scripts\python.exe -m pytest -q` -> `65 passed`
+- `.\.venv\Scripts\python.exe -m pytest -q` -> `94 passed`
+- `.\.venv\Scripts\python.exe -m pytest tests\test_personal_memory_recall.py -q` -> `29 passed`
+- `.\.venv\Scripts\python.exe -m pytest tests\test_personal_forbidden_scan.py -q` -> `2 passed`
 - `frontend` 下 `npm run typecheck` 通过
 
 ## 文档与边界

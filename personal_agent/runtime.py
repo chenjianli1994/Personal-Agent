@@ -11,10 +11,12 @@ from personal_agent.core import llm_gateway as llm_gateway_module
 from personal_agent.core.database import connect
 from personal_agent.core.utils import json_dumps, utc_now
 
+from .artifact_drafts import get_artifact_draft
 from .artifact_generation import propose_personal_artifact, revise_personal_artifact
 from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .context_builder import PersonalContextBuilder
 from .dev_tasks import DevTaskOrchestrator, is_continue_prompt
+from .document_intent import looks_like_document_generation
 from .intent_router import PersonalIntentRouter
 from .input_documents import activate_input_sources
 from .knowledge_recall import billable_memory_item_uids, record_recall_feedback, safe_recall_prompt_item
@@ -197,6 +199,8 @@ class PersonalRuntime:
         route: dict[str, Any],
         reflection: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._should_start_dev_task(session_uid=session_uid, prompt=prompt, route=route):
+            return self._start_dev_task_turn(session_uid=session_uid, prompt=prompt, route=route)
         intent = str(route.get("intent") or "answer_only")
         if intent == "generate_document":
             return self._generate_document_turn(session_uid=session_uid, prompt=prompt, context=context, route=route, reflection=reflection)
@@ -248,6 +252,49 @@ class PersonalRuntime:
             ).lastrowid
             row = conn.execute("SELECT * FROM personal_session_messages WHERE id=?", (rowid,)).fetchone()
         return self._message_payload(row)
+
+    def _should_start_dev_task(self, *, session_uid: str, prompt: str, route: dict[str, Any]) -> bool:
+        if self.dev_tasks.active_task_for_session(session_uid):
+            return False
+        policy_reason = str((route.get("policy") or {}).get("reason") or "")
+        if "置信度过低" in policy_reason:
+            return False
+        if str(route.get("intent") or "") == "generate_document":
+            return True
+        if looks_like_document_generation(prompt):
+            return True
+        if is_continue_prompt(prompt):
+            return True
+        return False
+
+    def _start_dev_task_turn(self, *, session_uid: str, prompt: str, route: dict[str, Any]) -> dict[str, Any]:
+        task = self.dev_tasks.start(session_uid=session_uid, prompt=prompt)
+        last_action = task.get("last_action") if isinstance(task.get("last_action"), dict) else {}
+        status = str(last_action.get("status") or task.get("status") or "")
+        stage = str(last_action.get("stage") or (task.get("next_action") or {}).get("stage") or "")
+        draft_uid = str(last_action.get("draft_uid") or "")
+        draft: dict[str, Any] = {}
+        if draft_uid:
+            draft = get_artifact_draft(self.db_path, project_id=self.project_id, draft_uid=draft_uid)
+            generation = draft.get("metadata", {}).get("generation") if isinstance(draft.get("metadata"), dict) else None
+            if isinstance(generation, dict):
+                draft["generation"] = generation
+        if status == "generated":
+            content = f"已创建开发任务，并生成 {stage} 阶段草稿。后续发送“继续”会按计划推进下一阶段。"
+        elif status == "quality_failed":
+            content = f"已创建开发任务，但 {stage} 阶段质量门未通过，需要先修订该阶段草稿。"
+        elif status == "blocked":
+            content = f"已创建开发任务，但暂时不能生成首阶段：{task.get('blocked_reason') or last_action.get('reason') or '存在阻塞项'}。"
+        elif status == "completed":
+            content = "已创建开发任务，当前文档链已推进完成。"
+        else:
+            content = "已创建开发任务，并记录当前推进状态。"
+        metadata: dict[str, Any] = {"context": "dev_task_start", "dev_task": task, "intent_route": _intent_metadata(route)}
+        if bool((route.get("policy") or {}).get("fallback")):
+            metadata["fallback"] = True
+        if draft:
+            metadata["draft"] = draft
+        return self._append_message(session_uid, "assistant", content, metadata)
 
     def _continue_dev_task_turn(self, *, session_uid: str, task_uid: str) -> dict[str, Any]:
         task = self.dev_tasks.continue_task(task_uid=task_uid)
@@ -381,18 +428,43 @@ class PersonalRuntime:
         route: dict[str, Any],
         reflection: dict[str, Any],
     ) -> dict[str, Any]:
-        draft_uid = str((context.get("active_draft") or {}).get("draft_uid") or "")
+        target = _resolve_revision_target(
+            self.db_path,
+            project_id=self.project_id,
+            session_uid=session_uid,
+            requested_revision=_route_target_revision(route),
+            active_draft=context.get("active_draft") if isinstance(context.get("active_draft"), dict) else {},
+        )
+        if not target.get("draft_uid"):
+            answer = target.get("blocked_reason") or "没有找到可修订的草稿，本轮没有生成新版本。"
+            return self._append_message(
+                session_uid,
+                "assistant",
+                answer,
+                {"context": "draft_revision_blocked", "revision_target": target, "intent_route": _intent_metadata(route)},
+            )
+        draft_uid = str(target["draft_uid"])
+        base_revision_index = int(target["base_revision_index"]) if target.get("base_revision_index") else None
         draft = revise_personal_artifact(
             self.db_path,
             project_id=self.project_id,
             workspace=self.workspace,
             draft_uid=draft_uid,
             feedback=prompt,
+            base_revision_index=base_revision_index,
             session_task_uid=session_uid,
             make_active=True,
         )
-        answer = f"已根据反馈修订《{draft['title']}》草稿 v{draft['current_revision']}。"
-        return self._append_message(session_uid, "assistant", answer, {"context": "draft_revision", "draft": draft, "intent_route": _intent_metadata(route)})
+        if target.get("explicit_revision"):
+            answer = f"已按你的指定，基于《{draft['title']}》v{base_revision_index} 修订，并生成新版本 v{draft['current_revision']}。"
+        else:
+            answer = f"已根据反馈修订《{draft['title']}》草稿 v{draft['current_revision']}。"
+        return self._append_message(
+            session_uid,
+            "assistant",
+            answer,
+            {"context": "draft_revision", "draft": draft, "revision_target": target, "intent_route": _intent_metadata(route)},
+        )
 
     def _learn_feedback_turn(self, *, session_uid: str, prompt: str, route: dict[str, Any], reflection: dict[str, Any]) -> dict[str, Any]:
         candidate = reflection.get("candidate") if isinstance(reflection.get("candidate"), dict) else None
@@ -692,6 +764,7 @@ def _intent_metadata(route: dict[str, Any]) -> dict[str, Any]:
         "intent": route.get("intent"),
         "confidence": route.get("confidence"),
         "target_document_type": route.get("target_document_type", ""),
+        "target_draft_revision": route.get("target_draft_revision", 0),
         "answer_mode": route.get("answer_mode", ""),
         "router_source": route.get("router_source", ""),
         "route_degraded": route_degraded,
@@ -699,6 +772,109 @@ def _intent_metadata(route: dict[str, Any]) -> dict[str, Any]:
         "llm": route.get("llm") or {},
         "policy": policy,
     }
+
+
+def _resolve_revision_target(
+    db_path: Path,
+    *,
+    project_id: int,
+    session_uid: str,
+    requested_revision: int | None,
+    active_draft: dict[str, Any],
+) -> dict[str, Any]:
+    active_draft_uid = str(active_draft.get("draft_uid") or "").strip()
+    if requested_revision is None:
+        return {
+            "draft_uid": active_draft_uid,
+            "base_revision_index": None,
+            "explicit_revision": False,
+            "source": "active_draft",
+        }
+    if active_draft_uid and _draft_has_revision(db_path, project_id=project_id, draft_uid=active_draft_uid, revision_index=requested_revision):
+        return {
+            "draft_uid": active_draft_uid,
+            "base_revision_index": requested_revision,
+            "explicit_revision": True,
+            "source": "active_draft_explicit_revision",
+        }
+    matches = _find_session_drafts_with_revision(
+        db_path,
+        project_id=project_id,
+        session_uid=session_uid,
+        revision_index=requested_revision,
+    )
+    if len(matches) == 1:
+        return {
+            "draft_uid": matches[0]["draft_uid"],
+            "base_revision_index": requested_revision,
+            "explicit_revision": True,
+            "source": "session_revision_match",
+        }
+    if len(matches) > 1:
+        return {
+            "draft_uid": "",
+            "base_revision_index": requested_revision,
+            "explicit_revision": True,
+            "source": "ambiguous_session_revision",
+            "blocked_reason": f"你指定了 v{requested_revision}，但当前会话里有多个草稿存在这个版本；本轮没有改动草稿。请先打开要修订的草稿，或在草稿箱里点对应草稿后再说“基于 v{requested_revision} 修改”。",
+        }
+    return {
+        "draft_uid": "",
+        "base_revision_index": requested_revision,
+        "explicit_revision": True,
+        "source": "missing_requested_revision",
+        "blocked_reason": f"没有找到你指定的 v{requested_revision} 版本，本轮没有改动草稿。",
+    }
+
+
+def _route_target_revision(route: dict[str, Any]) -> int | None:
+    value = route.get("target_draft_revision")
+    if value in (None, "", 0):
+        return None
+    try:
+        revision = int(value)
+    except (TypeError, ValueError):
+        return None
+    return revision if revision > 0 else None
+
+
+def _draft_has_revision(db_path: Path, *, project_id: int, draft_uid: str, revision_index: int) -> bool:
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM personal_draft_revisions r
+            JOIN personal_drafts d ON d.draft_uid=r.draft_uid
+            WHERE d.project_id=? AND d.draft_uid=? AND r.revision_index=?
+              AND d.status IN ('active', 'quality_failed')
+            """,
+            (project_id, draft_uid, revision_index),
+        ).fetchone()
+    return row is not None
+
+
+def _find_session_drafts_with_revision(
+    db_path: Path,
+    *,
+    project_id: int,
+    session_uid: str,
+    revision_index: int,
+) -> list[dict[str, Any]]:
+    if not session_uid:
+        return []
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT d.draft_uid, d.title, d.document_type, d.current_revision
+            FROM personal_drafts d
+            JOIN personal_draft_revisions r ON r.draft_uid=d.draft_uid
+            WHERE d.project_id=? AND d.session_uid=? AND r.revision_index=?
+              AND d.status IN ('active', 'quality_failed')
+            ORDER BY d.is_active DESC, d.updated_at DESC, d.id DESC
+            """,
+            (project_id, session_uid, revision_index),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _valid_used_uids(value: Any, allowed_uids: list[str]) -> list[str]:

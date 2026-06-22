@@ -94,7 +94,6 @@ export type AgentLlmStatus = {
   provider?: string;
   model?: string;
   error?: string;
-  fake_provider?: boolean;
   configured_source?: string;
   last_call_status?: string;
   last_call_purpose?: string;

@@ -42,6 +42,36 @@ def _add_active_source(client: TestClient) -> str:
     return response.json()["source_uid"]
 
 
+def _valid_requirement_analysis_content(topic: str) -> str:
+    return (
+        "# 需求分析报告\n\n"
+        "## 输入摘要\n"
+        "- source: current_prompt\n\n"
+        "## 原文事实表\n"
+        f"- 源文包含 {topic} 的用户可观察行为和边界要求。\n\n"
+        "## 术语与变量定义\n"
+        f"- {topic}：当前输入材料中需要分析的功能对象。\n"
+        "- 输入资料：用户当前提供的 source 材料。\n\n"
+        "## 需求理解\n"
+        f"- 需要围绕 {topic} 识别目标、边界、输入输出和验收风险。\n\n"
+        "## 条件与状态机\n"
+        "| 阶段 | 进入条件 | 适用对象 | 控制策略 | 退出/完成条件 | 证据引用 |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        f"| 分析 | 请根据 {topic} 编写功能规范 | 当前功能 | 编写功能规范并提炼用户可观察行为和边界 | 形成可验证需求 | source: current_prompt |\n"
+        "| 当前状态 | 当前状态 | 控制对象 | 按源文策略输出 | 状态变化后退出 | source: current_prompt |\n\n"
+        "## 歧义与待确认\n"
+        "- 当前输入无额外歧义。\n\n"
+        "## 关键假设\n"
+        "- 未确认的信息保持待澄清。\n\n"
+        "## 风险与边界\n"
+        "- 边界条件需要在后续拆解阶段继续确认。\n\n"
+        "## 验收建议\n"
+        "- 覆盖输入、输出、边界和异常场景。\n\n"
+        "## 证据引用\n"
+        "- source: current_prompt\n"
+    )
+
+
 def _create_candidate(client: TestClient, lesson: str) -> int:
     response = client.post("/api/personal/learning/feedback", json={"feedback": lesson})
     assert response.status_code == 200, response.json()
@@ -288,7 +318,7 @@ def test_document_generation_only_marks_explicitly_used_memory_helpful(tmp_path:
                 parsed={
                     "title": "AlphaPrecise 功能规范",
                     "content_format": "markdown",
-                    "content": "# 功能规范\n\n## 功能目标\n- AlphaPrecise\n\n## 用户可观察行为\n- 保留用户可观察行为\n\n## 输入与输出\n- 输入来自资料\n\n## 状态与异常场景\n- 覆盖边界\n\n## 非目标\n- 不写实现细节\n\n## 验收标准\n- 可验证\n\n## 证据引用\n- source: current_prompt\n",
+                    "content": _valid_requirement_analysis_content("AlphaPrecise"),
                     "memory_item_uids_used": [second_uid],
                 },
                 raw_text="{}",
@@ -405,7 +435,7 @@ def test_document_generation_records_locally_redacted_memory_when_content_is_saf
                 parsed={
                     "title": "AlphaDocTitleSafe 功能规范",
                     "content_format": "markdown",
-                    "content": "# 功能规范\n\n## 功能目标\n- AlphaDocTitleSafe\n\n## 用户可观察行为\n- 保留可观察行为\n\n## 输入与输出\n- 输入来自资料\n\n## 状态与异常场景\n- 覆盖边界\n\n## 非目标\n- 不写实现细节\n\n## 验收标准\n- 可验证\n\n## 证据引用\n- source: current_prompt\n",
+                    "content": _valid_requirement_analysis_content("AlphaDocTitleSafe"),
                     "memory_item_uids_used": ["kb_memory_doc_title_polluted"],
                 },
                 raw_text="{}",

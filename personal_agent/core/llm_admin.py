@@ -23,7 +23,6 @@ PROVIDER_KEY_NAMES = {
     "dashscope": "DASHSCOPE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "xai": "XAI_API_KEY",
-    "fake": "",
 }
 
 DEFAULT_MODELS = {
@@ -31,7 +30,6 @@ DEFAULT_MODELS = {
     "dashscope": "qwen3-coder-plus",
     "openrouter": "openai/gpt-4o-mini",
     "xai": "grok-3-mini",
-    "fake": "personal-fake-semantic-fixture",
 }
 
 RESTART_EXIT_CODE = 42
@@ -56,7 +54,6 @@ def read_personal_llm_admin_config(db_path: Path, env_path: Path | None = None) 
             {"value": "dashscope", "label": "DashScope", "default_model": DEFAULT_MODELS["dashscope"]},
             {"value": "openrouter", "label": "OpenRouter", "default_model": DEFAULT_MODELS["openrouter"]},
             {"value": "xai", "label": "xAI", "default_model": DEFAULT_MODELS["xai"]},
-            {"value": "fake", "label": "本地测试 Fake", "default_model": DEFAULT_MODELS["fake"]},
         ],
         "status": status,
         "restart_exit_code": RESTART_EXIT_CODE,

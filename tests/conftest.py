@@ -13,4 +13,5 @@ if str(ROOT) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def use_fake_personal_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_ENABLE_FAKE_LLM", "1")
     monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")

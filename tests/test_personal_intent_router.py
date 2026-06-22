@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from personal_agent.app import create_personal_app
-from personal_agent.core.llm_gateway import PersonalLLMGateway
+from personal_agent.core.llm_gateway import PersonalLLMError, PersonalLLMGateway
 from personal_agent.core.database import connect, init_db
 from personal_agent.context_builder import PersonalContextBuilder
 from personal_agent.intent_router import PersonalIntentRouter
@@ -119,7 +119,50 @@ def test_llm_gateway_fast_model_falls_back_to_default_when_not_configured(tmp_pa
     assert provider["model"] == "openai/gpt-4o-mini"
 
 
+def test_llm_gateway_defaults_to_deepseek(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("PERSONAL_AGENT_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL", "deepseek-test-model")
+
+    gateway = PersonalLLMGateway(tmp_path / "agent.db")
+
+    provider = gateway._select_provider(purpose="personal_artifact_generate")
+
+    assert provider["name"] == "deepseek"
+    assert provider["model"] == "deepseek-test-model"
+    assert provider["base_url"] == "https://api.deepseek.com/chat/completions"
+
+
+def test_llm_gateway_rejects_unknown_explicit_provider_without_key_fallback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "unknown")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+
+    gateway = PersonalLLMGateway(tmp_path / "agent.db")
+
+    try:
+        gateway._select_provider(purpose="personal_intent_route")
+    except PersonalLLMError as exc:
+        assert "Unsupported or unconfigured LLM provider" in str(exc)
+    else:
+        raise AssertionError("unknown explicit provider should not fall back to other configured keys")
+
+
+def test_llm_gateway_rejects_fake_provider_without_test_switch(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    monkeypatch.delenv("PERSONAL_AGENT_ENABLE_FAKE_LLM", raising=False)
+
+    gateway = PersonalLLMGateway(tmp_path / "agent.db")
+
+    try:
+        gateway._select_provider(purpose="personal_intent_route")
+    except PersonalLLMError as exc:
+        assert "Fake LLM provider is disabled" in str(exc)
+    else:
+        raise AssertionError("fake provider should be disabled outside the test switch")
+
+
 def test_llm_gateway_fake_provider_ignores_tier_model_selection(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_ENABLE_FAKE_LLM", "1")
     monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
     monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
     monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL_FAST", "openai/gpt-4.1-mini")

@@ -285,7 +285,7 @@ function resolveHistoryIndex({
 }
 
 function LlmBadge({ status }: { status?: AgentLlmStatus }) {
-  const isReal = Boolean(status?.configured && !status?.fake_provider);
+  const isReal = Boolean(status?.configured);
   const text = isReal ? `${status?.provider || "-"} / ${status?.model || "-"}` : "LLM 未配置";
   return <Tag color={isReal ? "green" : "red"}>{text}</Tag>;
 }
@@ -294,6 +294,11 @@ function Bubble({ item, onOpenDraftFile }: { item: LocalMessage; onOpenDraftFile
   const isUser = item.role === "user";
   const draft = asRecord(item.metadata?.draft);
   const draftUid = typeof draft.draft_uid === "string" ? draft.draft_uid : "";
+  const devTask = asRecord(item.metadata?.dev_task);
+  const devTaskUid = typeof devTask.task_uid === "string" ? devTask.task_uid : "";
+  const devTaskStatus = typeof devTask.status === "string" ? devTask.status : "";
+  const devTaskNextAction = asRecord(devTask.next_action);
+  const devTaskStage = typeof devTaskNextAction.stage === "string" ? devTaskNextAction.stage : "";
   const attachments = messageAttachments(item.metadata?.attachments);
   const provenance = recallProvenance(item.metadata?.recall_provenance);
   return (
@@ -326,6 +331,19 @@ function Bubble({ item, onOpenDraftFile }: { item: LocalMessage; onOpenDraftFile
                 </div>
               </div>
             ))}
+          </div>
+        ) : null}
+        {!isUser && devTaskUid ? (
+          <div className="message-attachments">
+            <div className="message-attachment-card">
+              <FileProtectOutlined />
+              <div>
+                <Typography.Text strong>开发任务 {devTaskStatus || "active"}</Typography.Text>
+                <Typography.Text type="secondary" className="personal-small">
+                  {devTaskStage ? `下一步：${devTaskStage}` : "任务已记录到 agent_tasks"}
+                </Typography.Text>
+              </div>
+            </div>
           </div>
         ) : null}
         {!isUser && draftUid ? (

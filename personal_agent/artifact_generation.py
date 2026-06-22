@@ -11,7 +11,7 @@ from personal_agent.core.utils import json_dumps
 
 from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .artifact_quality import validate_generated_artifact
-from .artifact_drafts import DOCUMENT_LINEAGE_ORDER, create_artifact_draft, get_artifact_draft, revise_artifact_draft_manual
+from .artifact_drafts import DOCUMENT_LINEAGE_ORDER, create_artifact_draft, get_artifact_content, get_artifact_draft, revise_artifact_draft_manual
 from .knowledge_recall import billable_memory_item_uids, recall_knowledge, record_recall_feedback, safe_recall_prompt_item
 from .knowledge_learning import pending_session_memory_candidates
 from .source_semantic_model import build_source_semantic_model
@@ -174,6 +174,7 @@ def revise_personal_artifact(
     workspace: Path | None = None,
     draft_uid: str,
     feedback: str,
+    base_revision_index: int | None = None,
     session_task_uid: str = "",
     session_uid: str = "",
     make_active: bool = True,
@@ -183,6 +184,14 @@ def revise_personal_artifact(
     if not feedback:
         raise ValueError("feedback is required")
     draft = get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
+    actual_current_revision = int(draft["current_revision"])
+    if base_revision_index is not None:
+        if base_revision_index <= 0:
+            raise ValueError("base_revision_index must be positive")
+        base = get_artifact_content(db_path, project_id=project_id, draft_uid=draft_uid, revision_index=base_revision_index)
+        draft = dict(draft)
+        draft["content"] = base["content"]
+        draft["current_revision"] = base_revision_index
     workspace_path = (workspace or db_path.parent).expanduser().resolve()
     ensure_default_document_skills(db_path, workspace=workspace_path, project_id=project_id)
     document_type = _resolve_document_type_for_draft(draft)
@@ -236,6 +245,8 @@ def revise_personal_artifact(
             "phase": "phase4_document_artifact_revision",
             "feedback": feedback,
             "previous_revision": draft["current_revision"],
+            "base_revision": base_revision_index or actual_current_revision,
+            "actual_previous_revision": actual_current_revision,
             "skill": {
                 "skill_uid": skill["skill_uid"],
                 "name": skill["name"],

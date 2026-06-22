@@ -2123,8 +2123,7 @@ function LlmConfigPanel({
   const runtime = status ?? config?.status;
   const options = config?.available_providers ?? [];
   const selectedOption = options.find((item) => item.value === provider);
-  const isFake = runtime?.fake_provider || runtime?.provider === "fake";
-  const isConfigured = Boolean(runtime?.configured && !isFake);
+  const isConfigured = Boolean(runtime?.configured);
 
   useEffect(() => {
     if (!config) return;
@@ -2136,8 +2135,8 @@ function LlmConfigPanel({
   return (
     <Space direction="vertical" size={12} className="full-width">
       <Space wrap>
-        <Tag color={isFake ? "orange" : isConfigured ? "green" : "red"}>
-          {isFake ? "测试 Fake" : isConfigured ? "真实 LLM 已接入" : "真实 LLM 未配置"}
+        <Tag color={isConfigured ? "green" : "red"}>
+          {isConfigured ? "真实 LLM 已接入" : "真实 LLM 未配置"}
         </Tag>
         <Tag>{String(runtime?.provider || "-")} / {String(runtime?.model || "-")}</Tag>
       </Space>
@@ -2157,7 +2156,7 @@ function LlmConfigPanel({
         type="primary"
         block
         loading={saving}
-        disabled={!provider || provider === "fake" || !model.trim()}
+        disabled={!provider || !model.trim()}
         onClick={() => onSave({ provider, model, api_key: apiKey, clear_other_provider_keys: true })}
       >
         保存

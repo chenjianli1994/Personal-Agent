@@ -50,7 +50,7 @@
 后端离线运行：
 
 ```powershell
-.\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870 --fake-llm
+.\.venv\Scripts\python.exe -m personal_agent serve --workspace . --db .personal_agent\agent.db --port 7870
 ```
 
 前端：
@@ -63,7 +63,9 @@ npm run dev
 
 当前验收结果：
 
-- `pytest -q`：`65 passed`
+- `pytest -q`：`94 passed`
+- `tests/test_personal_memory_recall.py -q`：`29 passed`
+- `tests/test_personal_forbidden_scan.py -q`：`2 passed`
 - `npm run typecheck`：通过
 
 ## 关键入口
@@ -86,4 +88,4 @@ npm run dev
 - 提交信息默认中文。
 - 提交前确认 `git status --short` 中没有误加本地文件。
 - 跨模块或护栏相关变更至少跑 `pytest -q` 和 `frontend` 下 `npm run typecheck`。
-- 如果改了文案、fake provider、bootstrap、知识导入、core 模块或 content guard，额外跑 forbidden scan 测试。
+- 如果改了文案、LLM 测试夹具、bootstrap、知识导入、core 模块或 content guard，额外跑 forbidden scan 测试。
