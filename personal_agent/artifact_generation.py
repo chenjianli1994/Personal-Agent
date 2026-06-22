@@ -56,6 +56,7 @@ def propose_personal_artifact(
     source_uids: list[str] | None = None,
     session_task_uid: str = "",
     session_uid: str = "",
+    task_uid: str = "",
     make_active: bool = True,
 ) -> dict[str, Any]:
     document_type = _resolve_document_type(prompt, document_type)
@@ -103,6 +104,7 @@ def propose_personal_artifact(
         content_format=generated["content_format"],
         source_uid=context["source_uids"][0] if context["source_uids"] else "",
         session_uid=session_uid or session_task_uid,
+        task_uid=task_uid,
         derived_from_draft_uid=str((context.get("upstream_drafts") or [{}])[0].get("draft_uid") or ""),
         metadata={
             "generation": {
@@ -175,6 +177,7 @@ def revise_personal_artifact(
     session_task_uid: str = "",
     session_uid: str = "",
     make_active: bool = True,
+    task_uid: str = "",
 ) -> dict[str, Any]:
     feedback = feedback.strip()
     if not feedback:
@@ -289,6 +292,7 @@ def propose_personal_code_patch(
     target_file: str = "",
     directives: list[dict[str, Any]] | None = None,
     session_uid: str = "",
+    task_uid: str = "",
     make_active: bool = True,
 ) -> dict[str, Any]:
     patch_result = propose_patch(
@@ -314,6 +318,7 @@ def propose_personal_code_patch(
         content=patch_text,
         content_format="diff",
         session_uid=session_uid,
+        task_uid=task_uid,
         metadata={
             "generation": {
                 "phase": "phase5_code_patch_linkage",
@@ -343,6 +348,7 @@ def propose_personal_unit_test_code(
     source_uids: list[str] | None = None,
     session_task_uid: str = "",
     session_uid: str = "",
+    task_uid: str = "",
     make_active: bool = True,
 ) -> dict[str, Any]:
     context = _generation_context(
@@ -363,6 +369,7 @@ def propose_personal_unit_test_code(
         content_format="diff",
         source_uid=context["source_uids"][0] if context["source_uids"] else "",
         session_uid=session_uid or session_task_uid,
+        task_uid=task_uid,
         derived_from_draft_uid=str((context.get("upstream_drafts") or [{}])[0].get("draft_uid") or ""),
         metadata={
             "generation": {

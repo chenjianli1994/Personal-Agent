@@ -44,6 +44,7 @@ def create_artifact_draft(
     content_format: str = "markdown",
     source_uid: str = "",
     session_uid: str = "",
+    task_uid: str = "",
     derived_from_draft_uid: str = "",
     lineage_stale: bool = False,
     metadata: dict[str, Any] | None = None,
@@ -74,16 +75,17 @@ def create_artifact_draft(
         conn.execute(
             """
             INSERT INTO personal_drafts(
-                draft_uid, project_id, source_uid, session_uid, document_type, title, content_format,
+                draft_uid, project_id, source_uid, session_uid, task_uid, document_type, title, content_format,
                 current_revision, derived_from_draft_uid, lineage_stale, status, is_active, metadata_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 draft_uid,
                 project_id,
                 source_uid.strip(),
                 session_uid.strip(),
+                task_uid.strip(),
                 document_type,
                 title,
                 content_format,
@@ -246,10 +248,11 @@ def revise_artifact_draft_manual(
             """
             UPDATE personal_drafts
             SET current_revision=?, metadata_json=?, status=COALESCE(?, status),
+                lineage_stale=CASE WHEN ? != 'quality_failed' THEN 0 ELSE lineage_stale END,
                 is_active=CASE WHEN ? THEN 1 ELSE is_active END, updated_at=?
             WHERE id=?
             """,
-            (next_index, json_dumps(metadata or {}), status, 1 if make_active else 0, now, row["id"]),
+            (next_index, json_dumps(metadata or {}), status, status or "", 1 if make_active else 0, now, row["id"]),
         )
         if status != "quality_failed":
             _mark_downstream_lineage_stale(conn, project_id=project_id, draft_uid=draft_uid)
@@ -351,6 +354,7 @@ def _draft_row_to_payload(row: Any, *, include_content: bool) -> dict[str, Any]:
         "project_id": row["project_id"],
         "source_uid": row["source_uid"],
         "session_uid": row["session_uid"],
+        "task_uid": row["task_uid"],
         "document_type": row["document_type"],
         "title": row["title"],
         "content_format": row["content_format"],

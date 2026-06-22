@@ -14,6 +14,7 @@ from personal_agent.core.utils import json_dumps, utc_now
 from .artifact_generation import propose_personal_artifact, revise_personal_artifact
 from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .context_builder import PersonalContextBuilder
+from .dev_tasks import DevTaskOrchestrator, is_continue_prompt
 from .intent_router import PersonalIntentRouter
 from .input_documents import activate_input_sources
 from .knowledge_recall import billable_memory_item_uids, record_recall_feedback, safe_recall_prompt_item
@@ -42,6 +43,7 @@ class PersonalRuntime:
         self.workspace = workspace
         self.project_id = project_id
         self.context_builder = PersonalContextBuilder(db_path, project_id)
+        self.dev_tasks = DevTaskOrchestrator(db_path, workspace=workspace, project_id=project_id)
         self.intent_router = PersonalIntentRouter(db_path, project_id)
         self.learning_reflector = PersonalLearningReflector(db_path, project_id)
         self.skill_reflector = PersonalSkillReflector(db_path, project_id)
@@ -105,6 +107,10 @@ class PersonalRuntime:
     def turn(self, *, content: str, session_uid: str = "", source_uids: list[str] | None = None) -> dict[str, Any]:
         prompt, source_uids = self._normalize_turn_input(content=content, source_uids=source_uids)
         session_uid = self._start_turn_session(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
+        active_task = self.dev_tasks.active_task_for_session(session_uid)
+        if active_task and is_continue_prompt(prompt):
+            message = self._continue_dev_task_turn(session_uid=session_uid, task_uid=str(active_task["task_uid"]))
+            return self._finish_turn(session_uid=session_uid, prompt=prompt, message=message)
         context, route, skill_reflection, reflection = self._prepare_turn_context(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
         message = self._dispatch_prepared_turn(
             session_uid=session_uid,
@@ -242,6 +248,28 @@ class PersonalRuntime:
             ).lastrowid
             row = conn.execute("SELECT * FROM personal_session_messages WHERE id=?", (rowid,)).fetchone()
         return self._message_payload(row)
+
+    def _continue_dev_task_turn(self, *, session_uid: str, task_uid: str) -> dict[str, Any]:
+        task = self.dev_tasks.continue_task(task_uid=task_uid)
+        last_action = task.get("last_action") if isinstance(task.get("last_action"), dict) else {}
+        status = str(last_action.get("status") or task.get("status") or "")
+        stage = str(last_action.get("stage") or (task.get("next_action") or {}).get("stage") or "")
+        if status == "generated":
+            content = f"已按任务推进到 {stage}，并生成本阶段草稿。"
+        elif status == "quality_failed":
+            content = f"任务推进停在 {stage}：质量门未通过，需要先修订该阶段草稿。"
+        elif status == "blocked":
+            content = f"任务暂时不能继续推进：{task.get('blocked_reason') or last_action.get('reason') or '存在阻塞项'}。"
+        elif status == "completed":
+            content = "任务文档链已推进完成。"
+        else:
+            content = "已检查任务推进状态。"
+        return self._append_message(
+            session_uid,
+            "assistant",
+            content,
+            {"context": "dev_task_continue", "dev_task": task},
+        )
 
     def _annotate_learning_reflection(self, message: dict[str, Any], reflection: dict[str, Any]) -> dict[str, Any]:
         candidate = reflection.get("candidate") if isinstance(reflection.get("candidate"), dict) else None

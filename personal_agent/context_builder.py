@@ -96,9 +96,9 @@ def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any
         if preferred_draft_uid:
             preferred = conn.execute(
                 """
-                SELECT draft_uid, document_type, title, current_revision, session_uid
+                SELECT draft_uid, document_type, title, current_revision, session_uid, status
                 FROM personal_drafts
-                WHERE project_id=? AND draft_uid=? AND session_uid=? AND status='active' AND is_active=1
+                WHERE project_id=? AND draft_uid=? AND session_uid=? AND status IN ('active', 'quality_failed') AND is_active=1
                 """,
                 (project_id, preferred_draft_uid, session_uid),
             ).fetchone()
@@ -106,9 +106,9 @@ def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any
                 return preferred
         return conn.execute(
             """
-            SELECT draft_uid, document_type, title, current_revision, session_uid
+            SELECT draft_uid, document_type, title, current_revision, session_uid, status
             FROM personal_drafts
-            WHERE project_id=? AND session_uid=? AND status='active' AND is_active=1
+            WHERE project_id=? AND session_uid=? AND status IN ('active', 'quality_failed') AND is_active=1
             ORDER BY updated_at DESC, id DESC LIMIT 1
             """,
             (project_id, session_uid),
@@ -116,9 +116,9 @@ def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any
     if preferred_draft_uid:
         preferred = conn.execute(
             """
-            SELECT draft_uid, document_type, title, current_revision, session_uid
+            SELECT draft_uid, document_type, title, current_revision, session_uid, status
             FROM personal_drafts
-            WHERE project_id=? AND draft_uid=? AND status='active' AND is_active=1
+            WHERE project_id=? AND draft_uid=? AND status IN ('active', 'quality_failed') AND is_active=1
             """,
             (project_id, preferred_draft_uid),
         ).fetchone()
@@ -126,9 +126,9 @@ def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any
             return preferred
     return conn.execute(
         """
-        SELECT draft_uid, document_type, title, current_revision, session_uid
+        SELECT draft_uid, document_type, title, current_revision, session_uid, status
         FROM personal_drafts
-        WHERE project_id=? AND status='active' AND is_active=1
+        WHERE project_id=? AND status IN ('active', 'quality_failed') AND is_active=1
         ORDER BY updated_at DESC, id DESC LIMIT 1
         """,
         (project_id,),

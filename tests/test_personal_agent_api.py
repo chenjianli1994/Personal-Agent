@@ -422,6 +422,52 @@ def test_chat_document_quality_failure_returns_failed_draft_and_skill_candidate(
     assert candidate["source"] == "quality_check_failure"
 
 
+def test_quality_failed_draft_remains_active_for_followup_revision(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_artifact_generate":
+            return LLMResult(
+                call_id=902,
+                provider="fake-test",
+                model="quality-failure-fixture",
+                status="ok",
+                parsed={
+                    "title": "证据引用过密的需求分析",
+                    "content_format": "markdown",
+                    "content": "# 需求分析报告\n\n## 输入摘要\n- source: current_prompt\n\n## 需求理解\n- 只写了证据引用，缺少章节。\n\n## 证据引用\n- source: current_prompt\n",
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+
+    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    assert generated.status_code == 200, generated.json()
+    session_uid = generated.json()["session"]["session_uid"]
+    draft_uid = generated.json()["message"]["metadata"]["draft"]["draft_uid"]
+    assert generated.json()["message"]["metadata"]["draft"]["status"] == "quality_failed"
+
+    session = client.get(f"/api/personal/sessions/{session_uid}").json()
+    assert session["active_draft_uid"] == draft_uid
+    from personal_agent.context_builder import PersonalContextBuilder
+
+    context = PersonalContextBuilder(db_path, project_id=1).build(session_uid=session_uid, prompt="把证据引用这些内容去掉")
+    assert context["active_draft"]["draft_uid"] == draft_uid
+    assert context["active_draft"]["status"] == "quality_failed"
+
+    followup = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "你把证据引用这些内容去掉"})
+    assert followup.status_code == 200, followup.json()
+    route = followup.json()["message"]["metadata"]["intent_route"]
+    assert route["intent"] == "revise_draft"
+    assert route["policy"]["fallback"] is False
+
+
 def test_policy_guard_blocks_document_generation_without_active_source(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
 

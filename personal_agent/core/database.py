@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -632,6 +633,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_uid TEXT NOT NULL UNIQUE,
     project_id INTEGER NOT NULL,
+    session_uid TEXT NOT NULL DEFAULT '',
     requirement_id TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL,
     task_type TEXT NOT NULL,
@@ -723,6 +725,7 @@ CREATE TABLE IF NOT EXISTS personal_drafts (
     project_id INTEGER NOT NULL,
     source_uid TEXT NOT NULL DEFAULT '',
     session_uid TEXT NOT NULL DEFAULT '',
+    task_uid TEXT NOT NULL DEFAULT '',
     document_type TEXT NOT NULL,
     title TEXT NOT NULL,
     content_format TEXT NOT NULL DEFAULT 'markdown',
@@ -925,10 +928,19 @@ def _ensure_compat_columns(conn: sqlite3.Connection) -> None:
         "personal_drafts",
         {
             "session_uid": "TEXT NOT NULL DEFAULT ''",
+            "task_uid": "TEXT NOT NULL DEFAULT ''",
             "derived_from_draft_uid": "TEXT NOT NULL DEFAULT ''",
             "lineage_stale": "INTEGER NOT NULL DEFAULT 0",
         },
     )
+    _add_columns(
+        conn,
+        "agent_tasks",
+        {
+            "session_uid": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _backfill_personal_draft_sessions(conn)
     _add_columns(
         conn,
         "code_files",
@@ -944,10 +956,83 @@ def _ensure_compat_columns(conn: sqlite3.Connection) -> None:
     _ensure_compat_indexes(conn)
 
 
+def _backfill_personal_draft_sessions(conn: sqlite3.Connection) -> None:
+    draft_columns = {row["name"] for row in conn.execute("PRAGMA table_info(personal_drafts)").fetchall()}
+    if "session_uid" not in draft_columns:
+        return
+    try:
+        messages = conn.execute(
+            """
+            SELECT session_uid, metadata_json
+            FROM personal_session_messages
+            WHERE role='assistant' AND metadata_json LIKE '%draft_uid%'
+            ORDER BY id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    for message in messages:
+        try:
+            metadata = json.loads(str(message["metadata_json"] or "{}"))
+        except Exception:
+            continue
+        draft = metadata.get("draft") if isinstance(metadata, dict) else None
+        if not isinstance(draft, dict):
+            continue
+        draft_uid = str(draft.get("draft_uid") or "").strip()
+        session_uid = str(message["session_uid"] or "").strip()
+        if not draft_uid or not session_uid:
+            continue
+        conn.execute(
+            """
+            UPDATE personal_drafts
+            SET session_uid=CASE WHEN session_uid='' THEN ? ELSE session_uid END,
+                updated_at=updated_at
+            WHERE draft_uid=?
+            """,
+            (session_uid, draft_uid),
+        )
+    try:
+        sessions = conn.execute(
+            """
+            SELECT session_uid
+            FROM personal_sessions
+            WHERE status='active' AND active_draft_uid=''
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    for session in sessions:
+        session_uid = str(session["session_uid"] or "")
+        draft = conn.execute(
+            """
+            SELECT draft_uid
+            FROM personal_drafts
+            WHERE session_uid=? AND is_active=1 AND status IN ('active', 'quality_failed')
+            ORDER BY updated_at DESC, id DESC LIMIT 1
+            """,
+            (session_uid,),
+        ).fetchone()
+        if draft is None:
+            continue
+        conn.execute(
+            "UPDATE personal_sessions SET active_draft_uid=? WHERE session_uid=? AND active_draft_uid=''",
+            (str(draft["draft_uid"] or ""), session_uid),
+        )
+
+
 def _ensure_compat_indexes(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_knowledge_search_entries_item_uid "
         "ON knowledge_search_entries(source_kind, item_uid)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_project_session_status "
+        "ON agent_tasks(project_id, session_uid, status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_personal_drafts_project_task_type_status "
+        "ON personal_drafts(project_id, task_uid, document_type, status)"
     )
 
 

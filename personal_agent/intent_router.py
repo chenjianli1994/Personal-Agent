@@ -61,6 +61,7 @@ class PersonalIntentRouter:
             error = str(exc)
             return _fallback_route(error, _failed_llm_call_metadata(self.db_path, error))
         route = _coerce_route(result.parsed)
+        route = _promote_draft_revision_followup(route, context)
         route["router_source"] = "llm"
         route["llm"] = {
             "call_id": result.call_id,
@@ -70,6 +71,63 @@ class PersonalIntentRouter:
             "purpose": "personal_intent_route",
         }
         return route
+
+
+def _promote_draft_revision_followup(route: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    if str(route.get("intent") or "") not in {"answer_only", "analyze_input_source"}:
+        return route
+    active_draft = context.get("active_draft") if isinstance(context.get("active_draft"), dict) else {}
+    if not active_draft or not active_draft.get("draft_uid"):
+        return route
+    prompt = str(context.get("prompt") or "")
+    compact = re.sub(r"\s+", "", prompt).lower()
+    edit_terms = (
+        "去掉",
+        "删掉",
+        "删除",
+        "移除",
+        "不要",
+        "改成",
+        "改为",
+        "修改",
+        "调整",
+        "补充",
+        "重写",
+        "润色",
+        "合并",
+        "拆分",
+    )
+    draft_context_terms = (
+        "草稿",
+        "文档",
+        "报告",
+        "内容",
+        "章节",
+        "段落",
+        "证据引用",
+        "质量项",
+        "这些",
+        "上面",
+        "刚才",
+        "当前",
+    )
+    if not any(term in compact for term in edit_terms):
+        return route
+    if not any(term in compact for term in draft_context_terms):
+        return route
+    promoted = dict(route)
+    promoted.update(
+        {
+            "intent": "revise_draft",
+            "confidence": max(float(promoted.get("confidence") or 0.0), 0.86),
+            "requires_active_draft": True,
+            "revises_draft": True,
+            "creates_draft": False,
+            "answer_mode": "general_chat",
+            "reason": (str(promoted.get("reason") or "").strip() + " Promoted to draft revision because the session has an active draft and the user gave an explicit edit instruction.").strip(),
+        }
+    )
+    return promoted
 
 
 def _router_payload(context: dict[str, Any]) -> dict[str, Any]:

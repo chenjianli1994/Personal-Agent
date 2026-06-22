@@ -31,6 +31,7 @@ from .artifact_generation import (
 from .artifact_export import export_personal_artifact, resolve_personal_artifact_download
 from .bootstrap import PersonalAgentContext
 from .document_intent import document_type_from_text, looks_like_document_generation
+from .dev_tasks import DevTaskOrchestrator
 from .runtime import PersonalRuntime, PersonalRuntimeError
 from .input_documents import (
     activate_input_source,
@@ -168,6 +169,8 @@ class PersonalValidationRunRequest(BaseModel):
     command: str = ""
     timeout_s: int = 120
     confirmed: bool = False
+    task_uid: str = ""
+    session_uid: str = ""
 
 
 class PersonalSourceTextRequest(BaseModel):
@@ -179,6 +182,7 @@ class PersonalSourceTextRequest(BaseModel):
 class PersonalArtifactDraftCreateRequest(BaseModel):
     document_type: str = ""
     session_uid: str = ""
+    task_uid: str = ""
     title: str
     content: str
     content_format: str = "markdown"
@@ -197,6 +201,7 @@ class PersonalArtifactDraftReviseRequest(BaseModel):
 class PersonalArtifactProposeRequest(BaseModel):
     prompt: str
     session_uid: str = ""
+    task_uid: str = ""
     document_type: str = ""
     source_uids: list[str] = Field(default_factory=list)
     make_active: bool = True
@@ -211,6 +216,7 @@ class PersonalArtifactReviseRequest(BaseModel):
 class PersonalArtifactCodePatchRequest(BaseModel):
     prompt: str
     session_uid: str = ""
+    task_uid: str = ""
     target_symbol: str = ""
     target_file: str = ""
     directives: list[PersonalPatchDirective] = []
@@ -220,8 +226,18 @@ class PersonalArtifactCodePatchRequest(BaseModel):
 class PersonalArtifactUnitTestRequest(BaseModel):
     prompt: str
     session_uid: str = ""
+    task_uid: str = ""
     source_uids: list[str] = Field(default_factory=list)
     make_active: bool = True
+
+
+class PersonalDevTaskStartRequest(BaseModel):
+    session_uid: str
+    prompt: str
+
+
+class PersonalDevTaskContinueRequest(BaseModel):
+    task_uid: str
 
 
 class PersonalArtifactExportRequest(BaseModel):
@@ -267,6 +283,8 @@ def register_personal_agent_routes(
     context: PersonalAgentContext,
     runtime: PersonalRuntime,
 ) -> None:
+    dev_tasks = DevTaskOrchestrator(context.db_path, workspace=context.workspace, project_id=context.project_id)
+
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         return {"status": "ok", "mode": "personal_agent", **context.to_dict()}
@@ -318,6 +336,33 @@ def register_personal_agent_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/personal/dev-tasks/start")
+    def personal_dev_task_start(req: PersonalDevTaskStartRequest) -> dict[str, Any]:
+        _require_capability(context, "artifact_generation")
+        try:
+            return dev_tasks.start(session_uid=req.session_uid, prompt=req.prompt)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/personal/dev-tasks/continue")
+    def personal_dev_task_continue(req: PersonalDevTaskContinueRequest) -> dict[str, Any]:
+        _require_capability(context, "artifact_generation")
+        try:
+            return dev_tasks.continue_task(task_uid=req.task_uid)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/personal/dev-tasks/{task_uid}")
+    def personal_dev_task_get(task_uid: str) -> dict[str, Any]:
+        try:
+            return dev_tasks.get(task_uid)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/personal/dev-tasks")
+    def personal_dev_task_list(session_uid: str = "", status: str = "") -> list[dict[str, Any]]:
+        return dev_tasks.list(session_uid=session_uid, status=status)
 
     @app.post("/api/agent/" + "unified" + "-turn")
     def personal_unified_turn(req: PersonalChatTurnRequest) -> dict[str, Any]:
@@ -454,6 +499,7 @@ def register_personal_agent_routes(
                 content_format=req.content_format,
                 source_uid=req.source_uid,
                 session_uid=req.session_uid,
+                task_uid=req.task_uid,
                 metadata=req.metadata,
                 make_active=req.make_active,
             )
@@ -475,6 +521,7 @@ def register_personal_agent_routes(
                 project_id=context.project_id,
                 prompt=req.prompt,
                 session_uid=req.session_uid,
+                task_uid=req.task_uid,
                 document_type=req.document_type,
                 source_uids=req.source_uids,
                 make_active=req.make_active,
@@ -492,6 +539,7 @@ def register_personal_agent_routes(
                 project_id=context.project_id,
                 prompt=str(req.get("prompt") or ""),
                 session_uid=str(req.get("session_uid") or ""),
+                task_uid=str(req.get("task_uid") or ""),
                 document_type=str(req.get("document_type") or req.get("artifact" + "_type") or ""),
                 source_uids=[str(item) for item in (req.get("source_uids") or [])],
                 make_active=bool(req.get("make_active", True)),
@@ -573,6 +621,7 @@ def register_personal_agent_routes(
                 project_id=context.project_id,
                 prompt=req.prompt,
                 session_uid=req.session_uid,
+                task_uid=req.task_uid,
                 target_symbol=req.target_symbol,
                 target_file=req.target_file,
                 directives=[_model_to_dict(item) for item in req.directives],
@@ -590,6 +639,7 @@ def register_personal_agent_routes(
                 project_id=context.project_id,
                 prompt=req.prompt,
                 session_uid=req.session_uid,
+                task_uid=req.task_uid,
                 source_uids=req.source_uids,
                 make_active=req.make_active,
             )
@@ -617,6 +667,7 @@ def register_personal_agent_routes(
                 project_id=context.project_id,
                 document_type=str(req.get("document_type") or req.get("artifact" + "_type") or ""),
                 session_uid=str(req.get("session_uid") or ""),
+                task_uid=str(req.get("task_uid") or ""),
                 title=str(req.get("title") or ""),
                 content=str(req.get("content") or ""),
                 content_format=str(req.get("content_format") or "markdown"),
@@ -1022,11 +1073,17 @@ def register_personal_agent_routes(
         tool_name = {"build": "run_build", "tests": "run_tests", "static-analysis": "run_static_analysis"}.get(kind)
         if not tool_name:
             raise HTTPException(status_code=404, detail="unknown validation kind")
+        validation_task_uid = req.task_uid
+        if not validation_task_uid and req.session_uid:
+            active = dev_tasks.active_task_for_session(req.session_uid)
+            validation_task_uid = str((active or {}).get("task_uid") or "")
         return _invoke_personal_tool(
             context,
             tool_name,
             {"command": req.command, "timeout_s": req.timeout_s},
             confirmed=req.confirmed,
+            task_uid=validation_task_uid,
+            validation_kind=kind,
         )
 
 def _require_capability(context: PersonalAgentContext, name: str) -> None:
@@ -1098,6 +1155,8 @@ def _invoke_personal_tool(
     *,
     confirmed: bool = False,
     dry_run: bool = False,
+    task_uid: str = "",
+    validation_kind: str = "",
 ) -> dict[str, Any]:
     payload = {
         **tool_input,
@@ -1110,10 +1169,22 @@ def _invoke_personal_tool(
         payload,
         project_id=context.project_id,
         **{legacy_key: str(payload.get(legacy_key) or "")},
+        task_uid=task_uid,
         caller="conversation",
         confirmed=confirmed,
         dry_run=dry_run,
     )
+    if validation_kind:
+        try:
+            task = DevTaskOrchestrator(context.db_path, workspace=context.workspace, project_id=context.project_id).record_validation(
+                task_uid=task_uid,
+                kind=validation_kind,
+                result=result,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 400, detail=str(exc)) from exc
+        if task:
+            result["dev_task"] = task
     if result["status"] in {"failed", "rejected"}:
         status = 400 if result["status"] == "rejected" else 500
         raise HTTPException(status_code=status, detail=result.get("error") or f"{tool_name} failed")
