@@ -485,7 +485,6 @@ function Bubble({
     <div className={`personal-bubble-row ${isUser ? "user" : "assistant"}`}>
       <div className="personal-avatar">{isUser ? <UserOutlined /> : <RobotOutlined />}</div>
       <div className={`personal-bubble ${isUser ? "user" : "assistant"} ${item.pending ? "pending" : ""}`}>
-        <Typography.Text strong>{isUser ? "你" : "Agent"}</Typography.Text>
         {isUser && attachments.length ? (
           <div className="message-attachments">
             {attachments.map((attachment, index) => (

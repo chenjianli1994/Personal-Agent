@@ -202,7 +202,6 @@
 }
 
 .personal-bubble-content {
-  margin-top: 4px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -941,10 +940,6 @@
   animation-delay: 0.3s;
 }
 
-.typewriter-shell {
-  margin-top: 4px;
-}
-
 .tw-caret {
   display: inline-block;
   width: 7px;
@@ -979,7 +974,6 @@
 }
 
 .markdown-body {
-  margin-top: 4px;
   line-height: 1.7;
   color: var(--pa-text);
 }
