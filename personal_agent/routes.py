@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from personal_agent.core.codebase.index_store import latest_repository
@@ -12,7 +12,7 @@ from personal_agent.core.database import connect
 from personal_agent.core.llm_admin import read_personal_llm_admin_config, save_personal_llm_admin_config
 from personal_agent.core.schemas import LlmAdminConfigRequest
 from personal_agent.core.tool_registry import TypedToolExecutor
-from personal_agent.core.utils import utc_now
+from personal_agent.core.utils import json_dumps, utc_now
 
 from .artifact_drafts import (
     activate_artifact_draft,
@@ -33,6 +33,7 @@ from .bootstrap import PersonalAgentContext
 from .dev_tasks import DevTaskOrchestrator
 from .runtime import PersonalRuntime, PersonalRuntimeError
 from .input_documents import (
+    MAX_UPLOAD_BYTES,
     activate_input_source,
     create_input_source,
     delete_input_source,
@@ -345,6 +346,23 @@ def register_personal_agent_routes(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/personal/chat/turn/stream")
+    def personal_chat_turn_stream(req: PersonalChatTurnRequest) -> StreamingResponse:
+        _require_capability(context, "chat")
+
+        def event_stream():
+            try:
+                for event in runtime.turn_events(content=req.content, session_uid=req.session_uid, source_uids=req.source_uids):
+                    yield f"data: {json_dumps(event)}\n\n"
+            except (PersonalRuntimeError, ValueError) as exc:
+                yield f"data: {json_dumps({'stage': 'error', 'error': str(exc)})}\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @app.post("/api/personal/dev-tasks/start")
     def personal_dev_task_start(req: PersonalDevTaskStartRequest) -> dict[str, Any]:
         _require_capability(context, "artifact_generation")
@@ -461,13 +479,27 @@ def register_personal_agent_routes(
 
     @app.post("/api/personal/sources/upload")
     async def personal_source_upload(
+        request: Request,
         file: UploadFile = File(...),
         title: str = Form(default=""),
         make_active: bool = Form(default=True),
     ) -> dict[str, Any]:
         _require_capability(context, "input_sources")
         try:
-            parsed = parse_uploaded_source(file.filename or "", await file.read())
+            content_length = request.headers.get("content-length")
+            if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_BYTES + 4096:
+                raise HTTPException(status_code=400, detail="uploaded file too large")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=400, detail="uploaded file too large")
+                chunks.append(chunk)
+            parsed = parse_uploaded_source(file.filename or "", b"".join(chunks))
             if title.strip():
                 parsed = _replace_parsed_title(parsed, title.strip())
             return create_input_source(

@@ -1,31 +1,45 @@
-import { Alert, Button, Collapse, Empty, Input, Space, Tag, Tooltip, Typography } from "antd";
+import { App, Alert, Button, Collapse, Dropdown, Empty, Input, Space, Tag, Tooltip, Typography } from "antd";
 import {
   ApiOutlined,
   BookOutlined,
+  BulbFilled,
   BulbOutlined,
   CodeOutlined,
+  CopyOutlined,
   FileDoneOutlined,
   FileProtectOutlined,
   FileTextOutlined,
   HistoryOutlined,
+  MoreOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   RobotOutlined,
   SendOutlined,
   StopOutlined,
   UploadOutlined,
-  UserOutlined
+  UserOutlined,
 } from "@ant-design/icons";
 import type { DragEvent, KeyboardEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { MarkdownMessage } from "./MarkdownMessage";
+import {
+  ACCEPTED_UPLOAD_ACCEPT,
+  COMPOSER_PLACEHOLDER,
+  EMPTY_CHAT_DESCRIPTION,
+  MAX_COMPOSER_ATTACHMENTS,
+  PENDING_MESSAGE,
+  toMessageAttachments,
+} from "./constants";
+import { useThemeMode } from "./theme";
 import type {
   AgentLlmStatus,
   PersonalDevTask,
   PersonalDevTaskStage,
   PersonalMessage,
   PersonalRecallProvenance,
-  PersonalSession
+  PersonalSession,
 } from "./types";
+import { useTypewriter } from "./useTypewriter";
 
 export type LocalMessage = PersonalMessage & { pending?: boolean };
 
@@ -35,18 +49,8 @@ export type ComposerAttachment = {
   status: "ready" | "uploading" | "uploaded" | "error";
   sourceUid?: string;
   error?: string;
+  progress?: number;
 };
-
-type MessageAttachment = {
-  source_uid?: string;
-  title?: string;
-  source_type?: string;
-  original_name?: string;
-};
-
-const composerAccept = ".txt,.md,.docx,.pdf,.xlsx,.xlsm";
-export const composerAcceptedExtensions = new Set(["txt", "md", "docx", "pdf", "xlsx", "xlsm"]);
-export const maxComposerAttachments = 5;
 
 export function ChatPanel({
   session,
@@ -62,6 +66,7 @@ export function ChatPanel({
   setInputHistoryIndex,
   onSend,
   onRetry,
+  onRegenerate,
   sending,
   sendDisabled,
   onCancelSend,
@@ -77,7 +82,9 @@ export function ChatPanel({
   onOpenKnowledge,
   onOpenLearning,
   onOpenCodebase,
-  onOpenSkills
+  onOpenSkills,
+  typewriterKey,
+  animationVersion,
 }: {
   session?: PersonalSession;
   optimistic: LocalMessage[];
@@ -92,6 +99,7 @@ export function ChatPanel({
   setInputHistoryIndex: (value: number | null) => void;
   onSend: () => void;
   onRetry?: () => void;
+  onRegenerate?: () => void;
   sending: boolean;
   sendDisabled?: boolean;
   onCancelSend?: () => void;
@@ -108,11 +116,21 @@ export function ChatPanel({
   onOpenLearning: () => void;
   onOpenCodebase: () => void;
   onOpenSkills: () => void;
+  typewriterKey?: string;
+  animationVersion: number;
 }) {
+  const { mode, toggle } = useThemeMode();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
-  const messages = [...(session?.messages ?? []), ...optimistic];
+  const messages = useMemo(() => [...(session?.messages ?? []), ...optimistic], [optimistic, session?.messages]);
+  const lastAssistantIndex = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role !== "user" && !message.pending) return index;
+    }
+    return -1;
+  }, [messages]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -131,6 +149,14 @@ export function ChatPanel({
     }
   };
 
+  const moreItems = [
+    { key: "knowledge", label: "知识库", icon: <BookOutlined />, onClick: onOpenKnowledge },
+    { key: "learning", label: "学习经验", icon: <BulbOutlined />, onClick: onOpenLearning },
+    { key: "codebase", label: "代码库", icon: <CodeOutlined />, onClick: onOpenCodebase },
+    { key: "skills", label: "Skills", icon: <FileProtectOutlined />, onClick: onOpenSkills },
+    { key: "llm", label: "LLM 设置", icon: <ApiOutlined />, onClick: onOpenLlmSettings },
+  ];
+
   return (
     <section
       className={`personal-chat ${draggingFiles ? "dragging-files" : ""}`}
@@ -146,45 +172,57 @@ export function ChatPanel({
           <Typography.Text type="secondary">对话</Typography.Text>
           <Typography.Title level={4}>{session?.title || "新的会话"}</Typography.Title>
         </Space>
-        <Space wrap className="personal-chat-tools">
+        <Space className="personal-chat-tools" size={8}>
           <LlmBadge status={llmStatus} />
-          <Tooltip title="输入材料">
-            <Button shape="circle" icon={<UploadOutlined />} onClick={onOpenSources} />
-          </Tooltip>
-          <Tooltip title="当前草稿">
-            <Button shape="circle" icon={<FileDoneOutlined />} onClick={() => onOpenDrafts()} />
-          </Tooltip>
-          <Tooltip title="任务">
-            <Button shape="circle" icon={<HistoryOutlined />} onClick={onOpenTasks} />
-          </Tooltip>
-          <Tooltip title="知识库">
-            <Button shape="circle" icon={<BookOutlined />} onClick={onOpenKnowledge} />
-          </Tooltip>
-          <Tooltip title="学习经验">
-            <Button shape="circle" icon={<BulbOutlined />} onClick={onOpenLearning} />
-          </Tooltip>
-          <Tooltip title="代码库">
-            <Button shape="circle" icon={<CodeOutlined />} onClick={onOpenCodebase} />
-          </Tooltip>
-          <Tooltip title="Skills">
-            <Button shape="circle" icon={<FileProtectOutlined />} onClick={onOpenSkills} />
-          </Tooltip>
-          <Tooltip title="LLM 设置">
-            <Button shape="circle" icon={<ApiOutlined />} onClick={onOpenLlmSettings} />
+          <Button aria-label="输入材料" icon={<UploadOutlined />} onClick={onOpenSources}>
+            材料
+          </Button>
+          <Button aria-label="当前草稿" icon={<FileDoneOutlined />} onClick={() => onOpenDrafts()}>
+            草稿
+          </Button>
+          <Button aria-label="任务" icon={<HistoryOutlined />} onClick={onOpenTasks}>
+            任务
+          </Button>
+          <Dropdown
+            menu={{
+              items: moreItems.map((item) => ({
+                key: item.key,
+                label: item.label,
+                icon: item.icon,
+                onClick: item.onClick,
+              })),
+            }}
+            trigger={["click"]}
+          >
+            <Button aria-label="更多" icon={<MoreOutlined />}>
+              更多
+            </Button>
+          </Dropdown>
+          <Tooltip title={mode === "dark" ? "切到亮色" : "切到暗色"}>
+            <Button
+              aria-label="切换主题"
+              shape="circle"
+              icon={mode === "dark" ? <BulbFilled /> : <BulbOutlined />}
+              onClick={toggle}
+            />
           </Tooltip>
         </Space>
       </header>
       <div className="personal-chat-messages" ref={scrollRef}>
         {currentTask ? <CurrentTaskBar task={currentTask} onOpenDrafts={onOpenDrafts} onContinueTask={onContinueTask} /> : null}
         {!messages.length ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="输入问题或任务，Agent 会给出回应。" />
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={EMPTY_CHAT_DESCRIPTION} />
         ) : (
           messages.map((item, index) => (
             <Bubble
-              key={`${item.role}-${item.created_at || index}-${index}`}
+              key={item.message_uid || `${item.role}-${item.created_at || index}-${index}`}
               item={item}
               onOpenDrafts={onOpenDrafts}
               onOpenDraftFile={onOpenDraftFile}
+              isLastAssistant={index === lastAssistantIndex}
+              onRegenerate={onRegenerate}
+              typewriterKey={typewriterKey}
+              animationVersion={animationVersion}
             />
           ))
         )}
@@ -214,7 +252,13 @@ export function ChatPanel({
                   className="composer-attachment-tag"
                 >
                   <FileTextOutlined /> {item.file.name}
-                  {item.status === "uploading" ? " 上传中" : item.status === "uploaded" ? " 已解析" : item.status === "error" ? ` 失败: ${item.error || ""}` : " 待发送"}
+                  {item.status === "uploading"
+                    ? item.progress ? ` 上传中 ${item.progress}%` : " 上传中"
+                    : item.status === "uploaded"
+                      ? " 已解析"
+                      : item.status === "error"
+                        ? ` 失败: ${item.error || ""}`
+                        : " 待发送"}
                 </Tag>
               ))}
             </div>
@@ -222,17 +266,24 @@ export function ChatPanel({
           <div className="composer-text-shell">
             <Tooltip title="添加文件">
               <Button
+                aria-label="添加文件"
                 type="text"
                 shape="circle"
                 className="composer-inline-upload"
                 icon={<UploadOutlined />}
-                disabled={sending || attachmentsUploading || attachments.length >= maxComposerAttachments}
+                disabled={sending || attachmentsUploading || attachments.length >= MAX_COMPOSER_ATTACHMENTS}
                 onClick={() => fileInputRef.current?.click()}
               />
             </Tooltip>
             <Input.TextArea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              onPaste={(event) => {
+                const files = Array.from(event.clipboardData.files || []);
+                if (!files.length) return;
+                event.preventDefault();
+                onAddAttachments(files);
+              }}
               onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
@@ -255,7 +306,7 @@ export function ChatPanel({
                 }
               }}
               autoSize={{ minRows: 3, maxRows: 8 }}
-              placeholder="随便问点什么"
+              placeholder={COMPOSER_PLACEHOLDER}
               className="composer-inline-textarea"
             />
           </div>
@@ -264,7 +315,7 @@ export function ChatPanel({
           ref={fileInputRef}
           type="file"
           multiple
-          accept={composerAccept}
+          accept={ACCEPTED_UPLOAD_ACCEPT}
           className="composer-file-input"
           onChange={(event) => {
             onAddAttachments(Array.from(event.target.files || []));
@@ -273,6 +324,7 @@ export function ChatPanel({
         />
         <Tooltip title={sending ? "停止本次回复" : sendDisabled ? "其他会话正在回复" : "发送"}>
           <Button
+            aria-label={sending ? "停止回复" : "发送消息"}
             type="primary"
             danger={sending}
             shape="circle"
@@ -309,13 +361,13 @@ function resolveHistoryIndex({
 function LlmBadge({ status }: { status?: AgentLlmStatus }) {
   const isReal = Boolean(status?.configured);
   const text = isReal ? `${status?.provider || "-"} / ${status?.model || "-"}` : "LLM 未配置";
-  return <Tag color={isReal ? "green" : "red"}>{text}</Tag>;
+  return <Tag className="llm-badge" color={isReal ? "green" : "red"}>{text}</Tag>;
 }
 
 function CurrentTaskBar({
   task,
   onOpenDrafts,
-  onContinueTask
+  onContinueTask,
 }: {
   task: PersonalDevTask;
   onOpenDrafts: (draftUid?: string) => void;
@@ -370,7 +422,7 @@ function CurrentTaskBar({
 
 function TaskStageTag({
   stage,
-  onOpenDrafts
+  onOpenDrafts,
 }: {
   stage: PersonalDevTaskStage;
   onOpenDrafts: (draftUid?: string) => void;
@@ -392,12 +444,21 @@ function TaskStageTag({
 function Bubble({
   item,
   onOpenDrafts,
-  onOpenDraftFile
+  onOpenDraftFile,
+  isLastAssistant,
+  onRegenerate,
+  typewriterKey,
+  animationVersion,
 }: {
   item: LocalMessage;
   onOpenDrafts: (draftUid?: string) => void;
   onOpenDraftFile: (draftUid: string) => void;
+  isLastAssistant: boolean;
+  onRegenerate?: () => void;
+  typewriterKey?: string;
+  animationVersion: number;
 }) {
+  const { message } = App.useApp();
   const isUser = item.role === "user";
   const draft = asRecord(item.metadata?.draft);
   const draftUid = typeof draft.draft_uid === "string" ? draft.draft_uid : "";
@@ -407,8 +468,18 @@ function Bubble({
   const devTaskNextAction = asRecord(devTask.next_action);
   const devTaskStage = typeof devTaskNextAction.stage === "string" ? devTaskNextAction.stage : "";
   const diagnostics = collectMessageDiagnostics(item.metadata);
-  const attachments = messageAttachments(item.metadata?.attachments);
+  const attachments = toMessageAttachments(item.metadata?.attachments);
   const provenance = recallProvenance(item.metadata?.recall_provenance);
+  const content = displayMessageContent(item.content, isUser);
+  const animate = !isUser && !item.pending && item.message_uid === typewriterKey;
+  const { shown, done, skip } = useTypewriter(content, animate);
+  const animationVersionRef = useRef(animationVersion);
+
+  useEffect(() => {
+    if (animationVersionRef.current === animationVersion) return;
+    animationVersionRef.current = animationVersion;
+    if (animate) skip();
+  }, [animate, animationVersion, skip]);
 
   return (
     <div className={`personal-bubble-row ${isUser ? "user" : "assistant"}`}>
@@ -428,7 +499,16 @@ function Bubble({
             ))}
           </div>
         ) : null}
-        <div className="personal-bubble-content">{displayMessageContent(item.content, isUser)}</div>
+        {item.pending ? (
+          <PendingIndicator startedAt={item.created_at} stage={item.content} />
+        ) : isUser ? (
+          <div className="personal-bubble-content">{content}</div>
+        ) : (
+          <div className="typewriter-shell">
+            <MarkdownMessage content={shown} />
+            {animate && !done ? <span className="tw-caret" /> : null}
+          </div>
+        )}
         {!isUser && provenance.length ? (
           <div className="message-attachments">
             {provenance.map((entry) => (
@@ -466,13 +546,65 @@ function Bubble({
           </Space>
         ) : null}
         {!isUser && diagnostics.length ? <MessageDiagnostics diagnostics={diagnostics} /> : null}
+        {!isUser && !item.pending ? (
+          <Space className="bubble-actions" size={4}>
+            <Tooltip title="复制">
+              <Button
+                aria-label="复制消息"
+                type="text"
+                size="small"
+                icon={<CopyOutlined />}
+                onClick={() => {
+                  navigator.clipboard?.writeText(content);
+                  message.success("已复制");
+                }}
+              />
+            </Tooltip>
+            {animate && !done ? (
+              <Button type="text" size="small" onClick={skip}>
+                跳过动画
+              </Button>
+            ) : null}
+            {isLastAssistant && onRegenerate ? (
+              <Tooltip title="重新生成">
+                <Button aria-label="重新生成" type="text" size="small" icon={<ReloadOutlined />} onClick={onRegenerate} />
+              </Tooltip>
+            ) : null}
+          </Space>
+        ) : null}
       </div>
     </div>
   );
 }
 
+function PendingIndicator({ startedAt, stage }: { startedAt?: string; stage?: string }) {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    const base = startedAt ? Date.parse(startedAt) : Date.now();
+    const timer = window.setInterval(() => {
+      setSeconds(Math.max(0, Math.round((Date.now() - base) / 1000)));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  return (
+    <div className="pending-indicator">
+      <span className="pending-dots" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+      </span>
+      <Typography.Text type="secondary" className="personal-small">
+        {stage && stage !== PENDING_MESSAGE ? stage : "正在思考"}
+        {seconds ? ` · ${seconds}s` : ""}
+      </Typography.Text>
+    </div>
+  );
+}
+
 function MessageDiagnostics({
-  diagnostics
+  diagnostics,
 }: {
   diagnostics: Array<{ key: string; title: string; lines: string[] }>;
 }) {
@@ -498,23 +630,11 @@ function MessageDiagnostics({
                 </div>
               ))}
             </div>
-          )
-        }
+          ),
+        },
       ]}
     />
   );
-}
-
-function messageAttachments(value: unknown): MessageAttachment[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
-    .map((item) => ({
-      source_uid: typeof item.source_uid === "string" ? item.source_uid : "",
-      title: typeof item.title === "string" ? item.title : "",
-      source_type: typeof item.source_type === "string" ? item.source_type : "",
-      original_name: typeof item.original_name === "string" ? item.original_name : "",
-    }));
 }
 
 function recallProvenance(value: unknown): PersonalRecallProvenance[] {

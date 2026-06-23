@@ -408,6 +408,44 @@ def test_personal_chat_runtime_split_keeps_response_shape(tmp_path: Path, monkey
     assert payload["message"]["metadata"]["intent_route"]["intent"] == "answer_only"
 
 
+def test_personal_chat_turn_stream_emits_stage_events_and_final_payload(tmp_path: Path, monkeypatch) -> None:
+    client, _db_path, _ = _client(tmp_path, monkeypatch)
+
+    response = client.post("/api/personal/chat/turn/stream", json={"content": "普通问题：你能做什么？"})
+
+    assert response.status_code == 200, response.text
+    frames = [chunk.strip() for chunk in response.text.split("\n\n") if chunk.strip()]
+    events = [json.loads(frame.removeprefix("data:").strip()) for frame in frames]
+    stages = [event["stage"] for event in events]
+
+    assert stages[:3] == ["route", "generate", "reflect"]
+    assert stages[-1] == "done"
+    assert events[-1]["payload"]["message"]["role"] == "assistant"
+    assert events[-1]["payload"]["session"]["session_uid"]
+
+
+def test_turn_events_defers_user_message_side_effect_until_first_stream_event(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    context = bootstrap_personal_agent(db_path, workspace)
+    from personal_agent.runtime import PersonalRuntime
+
+    runtime = PersonalRuntime(db_path, context.workspace, context.project_id)
+    events = runtime.turn_events(content="普通问题：你能做什么？")
+
+    first = next(events)
+    assert first["stage"] == "route"
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM personal_session_messages").fetchone()[0] == 0
+
+    second = next(events)
+    assert second["stage"] == "generate"
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM personal_session_messages").fetchone()[0] == 1
+
+
 def test_recall_feedback_failure_logs_warning_without_interrupting_response(tmp_path: Path, monkeypatch, caplog) -> None:
     client, _db_path, _ = _client(tmp_path, monkeypatch)
     created = client.post(
