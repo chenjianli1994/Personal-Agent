@@ -18,32 +18,6 @@ class PersonalContextBuilder:
     def build(self, *, session_uid: str, prompt: str, source_uids: list[str] | None = None) -> dict[str, Any]:
         requested_source_uids = list(dict.fromkeys(uid.strip() for uid in (source_uids or []) if uid.strip()))
         with connect(self.db_path) as conn:
-            if requested_source_uids:
-                placeholders = ",".join("?" for _ in requested_source_uids)
-                rows = conn.execute(
-                    f"""
-                    SELECT source_uid, title, source_type, plain_text, sections_json, tables_json
-                    FROM personal_input_sources
-                    WHERE project_id=? AND status='active' AND source_uid IN ({placeholders})
-                    """,
-                    (self.project_id, *requested_source_uids),
-                ).fetchall()
-                by_uid = {str(row["source_uid"]): row for row in rows}
-                missing = [uid for uid in requested_source_uids if uid not in by_uid]
-                if missing:
-                    raise ValueError(f"source not found: {missing[0]}")
-                sources = [by_uid[uid] for uid in requested_source_uids]
-            else:
-                sources = conn.execute(
-                    """
-                    SELECT source_uid, title, source_type, plain_text, sections_json, tables_json
-                    FROM personal_input_sources
-                    WHERE project_id=? AND status='active' AND is_active=1
-                    ORDER BY id DESC
-                    """,
-                    (self.project_id,),
-                ).fetchall()
-            draft = _select_active_draft(conn, project_id=self.project_id, session_uid=session_uid)
             messages = conn.execute(
                 """
                 SELECT role, content, metadata_json FROM personal_session_messages
@@ -52,6 +26,20 @@ class PersonalContextBuilder:
                 """,
                 (session_uid,),
             ).fetchall()
+            attachment_rows = conn.execute(
+                """
+                SELECT metadata_json FROM personal_session_messages
+                WHERE session_uid=?
+                ORDER BY id
+                """,
+                (session_uid,),
+            ).fetchall()
+            if requested_source_uids:
+                sources = _load_sources_by_uid(conn, project_id=self.project_id, source_uids=requested_source_uids, strict=True)
+            else:
+                session_source_uids = _session_attachment_source_uids(attachment_rows)
+                sources = _load_sources_by_uid(conn, project_id=self.project_id, source_uids=session_source_uids, strict=False) if session_source_uids else []
+            draft = _select_active_draft(conn, project_id=self.project_id, session_uid=session_uid)
         source_payload = [
             {
                 "source_uid": row["source_uid"],
@@ -80,6 +68,42 @@ class PersonalContextBuilder:
             "code_evidence": latest_repository(self.db_path, self.project_id) or {},
             "requirement_summary": _requirement_summary(source_payload, prompt),
         }
+
+
+def _load_sources_by_uid(conn: Any, *, project_id: int, source_uids: list[str], strict: bool) -> list[Any]:
+    if not source_uids:
+        return []
+    placeholders = ",".join("?" for _ in source_uids)
+    rows = conn.execute(
+        f"""
+        SELECT source_uid, title, source_type, plain_text, sections_json, tables_json
+        FROM personal_input_sources
+        WHERE project_id=? AND status='active' AND source_uid IN ({placeholders})
+        """,
+        (project_id, *source_uids),
+    ).fetchall()
+    by_uid = {str(row["source_uid"]): row for row in rows}
+    if strict:
+        missing = [uid for uid in source_uids if uid not in by_uid]
+        if missing:
+            raise ValueError(f"source not found: {missing[0]}")
+    return [by_uid[uid] for uid in source_uids if uid in by_uid]
+
+
+def _session_attachment_source_uids(messages: list[Any]) -> list[str]:
+    result: list[str] = []
+    for row in reversed(messages):
+        metadata = _loads_json(row["metadata_json"], {})
+        attachments = metadata.get("attachments") if isinstance(metadata, dict) else []
+        if not isinstance(attachments, list):
+            continue
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            source_uid = str(item.get("source_uid") or "").strip()
+            if source_uid and source_uid not in result:
+                result.append(source_uid)
+    return result
 
 
 def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any:

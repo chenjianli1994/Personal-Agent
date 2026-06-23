@@ -104,6 +104,7 @@ export type LlmProviderOption = {
   value: string;
   label: string;
   default_model: string;
+  model_options?: string[];
 };
 
 export type PersonalLlmConfig = {

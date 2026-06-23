@@ -459,7 +459,10 @@ def test_draft_revision_feedback_can_create_temporary_skill_candidate(tmp_path: 
         json={"title": "功能材料", "content": "水泵需要根据充电状态和水温阈值控制启停。", "make_active": True},
     )
     assert source.status_code == 200
-    generated = client.post("/api/personal/chat/turn", json={"content": "生成功能规范"})
+    generated = client.post(
+        "/api/personal/chat/turn",
+        json={"content": "生成功能规范", "source_uids": [source.json()["source_uid"]]},
+    )
     assert generated.status_code == 200
     session_uid = generated.json()["session"]["session_uid"]
     draft_uid = generated.json()["message"]["metadata"]["draft"]["draft_uid"]

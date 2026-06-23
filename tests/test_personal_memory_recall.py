@@ -280,12 +280,12 @@ def test_safe_recall_prompt_item_drops_forbidden_system_fields() -> None:
 
 def test_document_generation_records_use_and_helpful_only_after_draft_success(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_active_source(client)
+    source_uid = _add_active_source(client)
     candidate_id = _create_candidate(client, "以后生成 AlphaDoc 功能规范时保留用户可观察行为")
     _approve_candidate(client, candidate_id)
     item_uid = f"kb_memory_{candidate_id}"
 
-    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaDoc 功能规范"})
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaDoc 功能规范", "source_uids": [source_uid]})
 
     assert response.status_code == 200, response.json()
     draft = response.json()["message"]["metadata"]["draft"]
@@ -299,7 +299,7 @@ def test_document_generation_records_use_and_helpful_only_after_draft_success(tm
 
 def test_document_generation_only_marks_explicitly_used_memory_helpful(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_active_source(client)
+    source_uid = _add_active_source(client)
     first_id = _create_candidate(client, "以后生成 AlphaPrecise 功能规范时保留用户可观察行为")
     second_id = _create_candidate(client, "以后生成 AlphaPrecise 功能规范时先列边界")
     _approve_candidate(client, first_id)
@@ -327,7 +327,7 @@ def test_document_generation_only_marks_explicitly_used_memory_helpful(tmp_path:
 
     monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
 
-    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaPrecise 功能规范"})
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaPrecise 功能规范", "source_uids": [source_uid]})
 
     assert response.status_code == 200, response.json()
     first_stats = _item_stats(db_path, first_uid)
@@ -340,7 +340,7 @@ def test_document_generation_only_marks_explicitly_used_memory_helpful(tmp_path:
 
 def test_document_generation_without_explicit_used_memory_does_not_mark_helpful(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_active_source(client)
+    source_uid = _add_active_source(client)
     candidate_id = _create_candidate(client, "以后生成 AlphaNoHelpful 功能规范时保留用户可观察行为")
     _approve_candidate(client, candidate_id)
     item_uid = f"kb_memory_{candidate_id}"
@@ -364,7 +364,7 @@ def test_document_generation_without_explicit_used_memory_does_not_mark_helpful(
 
     monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
 
-    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaNoHelpful 功能规范"})
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaNoHelpful 功能规范", "source_uids": [source_uid]})
 
     assert response.status_code == 200, response.json()
     stats = _item_stats(db_path, item_uid)
@@ -375,7 +375,7 @@ def test_document_generation_without_explicit_used_memory_does_not_mark_helpful(
 def test_document_generation_filters_forbidden_legacy_memory_from_prompt_and_accounting(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     project_id = _project_id(client)
-    _add_active_source(client)
+    source_uid = _add_active_source(client)
     polluted = FORBIDDEN_PERSONAL_TERMS[0]
     now = "2026-01-01T00:00:00Z"
     with connect(db_path) as conn:
@@ -396,7 +396,7 @@ def test_document_generation_filters_forbidden_legacy_memory_from_prompt_and_acc
 
     monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
 
-    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaDocPolluted 功能规范"})
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaDocPolluted 功能规范", "source_uids": [source_uid]})
 
     assert response.status_code == 200, response.json()
     assert polluted not in captured["user_prompt"]
@@ -412,7 +412,7 @@ def test_document_generation_filters_forbidden_legacy_memory_from_prompt_and_acc
 def test_document_generation_records_locally_redacted_memory_when_content_is_safe(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     project_id = _project_id(client)
-    _add_active_source(client)
+    source_uid = _add_active_source(client)
     polluted = FORBIDDEN_PERSONAL_TERMS[0]
     now = "2026-01-01T00:00:00Z"
     with connect(db_path) as conn:
@@ -444,7 +444,7 @@ def test_document_generation_records_locally_redacted_memory_when_content_is_saf
 
     monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
 
-    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaDocTitleSafe 功能规范"})
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaDocTitleSafe 功能规范", "source_uids": [source_uid]})
 
     assert response.status_code == 200, response.json()
     stats = _item_stats(db_path, "kb_memory_doc_title_polluted")
@@ -454,7 +454,7 @@ def test_document_generation_records_locally_redacted_memory_when_content_is_saf
 
 def test_failed_quality_gate_records_use_but_not_helpful(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_active_source(client)
+    source_uid = _add_active_source(client)
     candidate_id = _create_candidate(client, "以后生成 AlphaQuality 功能规范时保留用户可观察行为")
     _approve_candidate(client, candidate_id)
     item_uid = f"kb_memory_{candidate_id}"
@@ -474,7 +474,7 @@ def test_failed_quality_gate_records_use_but_not_helpful(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
 
-    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaQuality 功能规范"})
+    response = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaQuality 功能规范", "source_uids": [source_uid]})
 
     assert response.status_code == 200, response.json()
     assert response.json()["message"]["metadata"]["draft"]["status"] == "quality_failed"
@@ -915,7 +915,7 @@ def test_chitchat_turn_skips_learning_reflector_and_does_not_create_candidate(tm
 
 def test_correction_and_document_generation_are_not_gated_from_learning_reflector(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_active_source(client)
+    source_uid = _add_active_source(client)
     calls: list[dict[str, Any]] = []
     original_complete_json = LLMBridge.complete_json
 
@@ -928,7 +928,7 @@ def test_correction_and_document_generation_are_not_gated_from_learning_reflecto
 
     correction = client.post("/api/personal/chat/turn", json={"content": "你理解错了，AlphaGate 应该先确认我的纠正点"})
     assert correction.status_code == 200, correction.json()
-    document = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaGate 功能规范"})
+    document = client.post("/api/personal/chat/turn", json={"content": "生成 AlphaGate 功能规范", "source_uids": [source_uid]})
     assert document.status_code == 200, document.json()
 
     assert any(item["implicit_learning_events"] and item["implicit_learning_events"][0]["type"] == "explicit_correction" for item in calls)

@@ -43,10 +43,10 @@ def _source(client: TestClient) -> str:
     return response.json()["source_uid"]
 
 
-def _start_task(client: TestClient, session_uid: str) -> dict[str, Any]:
+def _start_task(client: TestClient, session_uid: str, source_uids: list[str] | None = None) -> dict[str, Any]:
     response = client.post(
         "/api/personal/dev-tasks/start",
-        json={"session_uid": session_uid, "prompt": "落地热管理控制需求"},
+        json={"session_uid": session_uid, "prompt": "落地热管理控制需求", "source_uids": source_uids or []},
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -74,9 +74,9 @@ def test_start_without_active_source_is_policy_blocked_and_creates_no_draft(tmp_
 def test_start_with_source_generates_first_stage_draft_and_writes_task_uid(tmp_path: Path, monkeypatch: Any) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
+    source_uid = _source(client)
 
-    task = _start_task(client, session_uid)
+    task = _start_task(client, session_uid, [source_uid])
 
     assert task["status"] == "active"
     assert task["stages"][0]["effective_status"] == "done"
@@ -90,8 +90,8 @@ def test_start_with_source_generates_first_stage_draft_and_writes_task_uid(tmp_p
 def test_continue_advances_exactly_one_pending_stage(tmp_path: Path, monkeypatch: Any) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
-    task = _start_task(client, session_uid)
+    source_uid = _source(client)
+    task = _start_task(client, session_uid, [source_uid])
 
     advanced = _continue_task(client, task["task_uid"])
 
@@ -108,8 +108,8 @@ def test_stage_order_is_derived_from_document_lineage_order() -> None:
 def test_regenerated_upstream_marks_multiple_downstream_stages_needs_revision(tmp_path: Path, monkeypatch: Any) -> None:
     client, _db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
-    task = _start_task(client, session_uid)
+    source_uid = _source(client)
+    task = _start_task(client, session_uid, [source_uid])
     task = _continue_task(client, task["task_uid"])
     task = _continue_task(client, task["task_uid"])
 
@@ -136,8 +136,8 @@ def test_regenerated_upstream_marks_multiple_downstream_stages_needs_revision(tm
 def test_continue_blocks_when_needs_revision_exists_and_does_not_auto_revise(tmp_path: Path, monkeypatch: Any) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
-    task = _start_task(client, session_uid)
+    source_uid = _source(client)
+    task = _start_task(client, session_uid, [source_uid])
     task = _continue_task(client, task["task_uid"])
     draft_uid = task["stages"][1]["draft_uid"]
     client.post(
@@ -186,9 +186,9 @@ def test_quality_failed_stage_stops_current_stage(tmp_path: Path, monkeypatch: A
     monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
     client, _db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
+    source_uid = _source(client)
 
-    task = _start_task(client, session_uid)
+    task = _start_task(client, session_uid, [source_uid])
 
     assert task["status"] == "blocked"
     assert task["stages"][0]["effective_status"] == "needs_revision"
@@ -198,8 +198,8 @@ def test_quality_failed_stage_stops_current_stage(tmp_path: Path, monkeypatch: A
 def test_detailed_design_requires_code_index(tmp_path: Path, monkeypatch: Any) -> None:
     client, _db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
-    task = _start_task(client, session_uid)
+    source_uid = _source(client)
+    task = _start_task(client, session_uid, [source_uid])
     task = _continue_task(client, task["task_uid"])
     task = _continue_task(client, task["task_uid"])
 
@@ -214,9 +214,9 @@ def test_detailed_design_requires_code_index(tmp_path: Path, monkeypatch: Any) -
 def test_start_archives_old_active_like_task_in_same_session(tmp_path: Path, monkeypatch: Any) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
-    first = _start_task(client, session_uid)
-    second = _start_task(client, session_uid)
+    source_uid = _source(client)
+    first = _start_task(client, session_uid, [source_uid])
+    second = _start_task(client, session_uid, [source_uid])
 
     assert first["task_uid"] != second["task_uid"]
     with connect(db_path) as conn:
@@ -227,9 +227,9 @@ def test_start_archives_old_active_like_task_in_same_session(tmp_path: Path, mon
 def test_archived_task_cannot_be_continued(tmp_path: Path, monkeypatch: Any) -> None:
     client, _db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
-    first = _start_task(client, session_uid)
-    _start_task(client, session_uid)
+    source_uid = _source(client)
+    first = _start_task(client, session_uid, [source_uid])
+    _start_task(client, session_uid, [source_uid])
 
     response = client.post("/api/personal/dev-tasks/continue", json={"task_uid": first["task_uid"]})
 
@@ -240,8 +240,8 @@ def test_archived_task_cannot_be_continued(tmp_path: Path, monkeypatch: Any) -> 
 def test_runtime_continue_prompt_intercepts_and_other_prompts_use_intent_router(tmp_path: Path, monkeypatch: Any) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
-    task = _start_task(client, session_uid)
+    source_uid = _source(client)
+    task = _start_task(client, session_uid, [source_uid])
 
     continued = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "继续"})
     assert continued.status_code == 200, continued.text
@@ -257,9 +257,9 @@ def test_runtime_continue_prompt_intercepts_and_other_prompts_use_intent_router(
 
 def test_runtime_document_generation_starts_dev_task_and_returns_metadata(tmp_path: Path, monkeypatch: Any) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _source(client)
+    source_uid = _source(client)
 
-    response = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    response = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告", "source_uids": [source_uid]})
 
     assert response.status_code == 200, response.text
     message = response.json()["message"]
@@ -319,8 +319,8 @@ def test_validation_summary_classification_uses_kind_returncode_timeout_and_conf
 def test_validation_without_task_identity_is_not_attached_to_latest_task(tmp_path: Path, monkeypatch: Any) -> None:
     client, db_path, workspace = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
-    task = _start_task(client, session_uid)
+    source_uid = _source(client)
+    task = _start_task(client, session_uid, [source_uid])
     orchestrator = DevTaskOrchestrator(db_path, workspace=workspace, project_id=1)
 
     attached = orchestrator.record_validation(
@@ -359,9 +359,9 @@ def test_task_progress_invokes_policy_guard(tmp_path: Path, monkeypatch: Any) ->
     monkeypatch.setattr("personal_agent.dev_tasks.apply_personal_policy", fake_policy)
     client, db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)
-    _source(client)
+    source_uid = _source(client)
 
-    task = _start_task(client, session_uid)
+    task = _start_task(client, session_uid, [source_uid])
 
     assert calls
     assert task["status"] == "blocked"

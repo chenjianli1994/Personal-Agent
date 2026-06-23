@@ -1292,8 +1292,7 @@ def test_document_generation_requires_configured_llm_and_creates_no_draft(tmp_pa
         "PERSONAL_AGENT_LLM_MODEL",
         "DEEPSEEK_API_KEY",
         "DASHSCOPE_API_KEY",
-        "OPENROUTER_API_KEY",
-        "XAI_API_KEY",
+        "MIMO_API_KEY",
     ]:
         monkeypatch.delenv(key, raising=False)
 

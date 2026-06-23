@@ -233,6 +233,7 @@ class PersonalArtifactUnitTestRequest(BaseModel):
 class PersonalDevTaskStartRequest(BaseModel):
     session_uid: str
     prompt: str
+    source_uids: list[str] = Field(default_factory=list)
 
 
 class PersonalDevTaskContinueRequest(BaseModel):
@@ -340,7 +341,7 @@ def register_personal_agent_routes(
     def personal_dev_task_start(req: PersonalDevTaskStartRequest) -> dict[str, Any]:
         _require_capability(context, "artifact_generation")
         try:
-            return dev_tasks.start(session_uid=req.session_uid, prompt=req.prompt)
+            return dev_tasks.start(session_uid=req.session_uid, prompt=req.prompt, source_uids=req.source_uids)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

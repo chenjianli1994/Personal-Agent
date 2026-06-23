@@ -31,9 +31,10 @@ class DevTaskOrchestrator:
         self.project_id = project_id
         self.context_builder = PersonalContextBuilder(db_path, project_id)
 
-    def start(self, *, session_uid: str, prompt: str) -> dict[str, Any]:
+    def start(self, *, session_uid: str, prompt: str, source_uids: list[str] | None = None) -> dict[str, Any]:
         session_uid = session_uid.strip()
         prompt = prompt.strip()
+        task_source_uids = list(dict.fromkeys(uid.strip() for uid in (source_uids or []) if uid.strip()))
         if not session_uid:
             raise ValueError("session_uid is required")
         if not prompt:
@@ -43,6 +44,7 @@ class DevTaskOrchestrator:
         now = utc_now()
         plan = {
             "stage_order": dev_task_stage_order(),
+            "source_uids": task_source_uids,
             "last_action": {"type": "start", "status": "created", "at": now},
             "blocked_reason": "",
             "validation_summary": {},
@@ -150,7 +152,8 @@ class DevTaskOrchestrator:
         if pending_stage["document_type"] == "detailed_design" and not self._has_code_index():
             return self._block(row, "detailed_design requires an indexed codebase", pending_stage, action_type)
 
-        policy = self._policy_for_stage(row, pending_stage["document_type"])
+        stage_context = self._context_for_task(row)
+        policy = self._policy_for_stage(stage_context, pending_stage["document_type"])
         if not bool((policy.get("policy") or {}).get("allowed", True)):
             reason = str((policy.get("policy") or {}).get("reason") or "policy_guard blocked generation")
             return self._block(row, reason, pending_stage, action_type, policy=policy)
@@ -161,7 +164,7 @@ class DevTaskOrchestrator:
             project_id=self.project_id,
             prompt=str(row["user_prompt"] or ""),
             document_type=pending_stage["document_type"],
-            source_uids=[],
+            source_uids=stage_context["active_source_uids"],
             session_uid=str(row["session_uid"] or ""),
             task_uid=str(row["task_uid"] or ""),
             make_active=True,
@@ -185,8 +188,15 @@ class DevTaskOrchestrator:
         self._update_plan(str(row["task_uid"]), plan, status=status, current_step=pending_stage["document_type"], error_message=failed_reason)
         return self.get(str(row["task_uid"]))
 
-    def _policy_for_stage(self, row: Any, document_type: str) -> dict[str, Any]:
-        context = self.context_builder.build(session_uid=str(row["session_uid"] or ""), prompt=str(row["user_prompt"] or ""))
+    def _context_for_task(self, row: Any) -> dict[str, Any]:
+        plan = _loads_json(row["plan_json"], {})
+        source_uids = [str(uid).strip() for uid in (plan.get("source_uids") or []) if str(uid).strip()]
+        kwargs: dict[str, Any] = {"session_uid": str(row["session_uid"] or ""), "prompt": str(row["user_prompt"] or "")}
+        if source_uids:
+            kwargs["source_uids"] = source_uids
+        return self.context_builder.build(**kwargs)
+
+    def _policy_for_stage(self, context: dict[str, Any], document_type: str) -> dict[str, Any]:
         route = {
             "intent": "generate_document",
             "confidence": 1.0,

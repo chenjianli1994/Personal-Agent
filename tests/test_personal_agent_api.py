@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
 
 from personal_agent.core import llm_gateway as llm_gateway_module
-from personal_agent.bootstrap import bootstrap_personal_agent
+from personal_agent.core import llm_admin as llm_admin_module
+from personal_agent.bootstrap import bootstrap_personal_agent, load_personal_env
 from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS, RETIRED_PROJECT_INPUT_KEYS
-from personal_agent.core.database import connect
+from personal_agent.context_builder import PersonalContextBuilder
+from personal_agent.core.database import connect, init_db
 from personal_agent.app import create_personal_app
 
 
@@ -107,6 +110,44 @@ def test_json_responses_preserve_utf8_text(tmp_path: Path, monkeypatch) -> None:
     assert content in detail_text
     assert "\ufffd" not in detail_text
     assert detail.json()["plain_text"] == content
+
+
+def test_new_session_does_not_inherit_project_active_source(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    source = _add_source(client)
+
+    context = PersonalContextBuilder(db_path, project_id=1).build(session_uid="session_new", prompt="你好")
+    proposed = client.post(
+        "/api/personal/artifacts/propose",
+        json={"prompt": "生成需求分析报告", "document_type": "requirement_analysis_report"},
+    )
+
+    assert source["is_active"] is True
+    assert context["active_source_uids"] == []
+    assert context["sources"] == []
+    assert proposed.status_code == 200, proposed.text
+    assert proposed.json()["metadata"]["generation"]["evidence_refs"]["active_source_uids"] == []
+
+
+def test_session_followup_reuses_only_its_own_attached_sources(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    first_source = _add_source(client)
+    second_source = client.post(
+        "/api/personal/sources/text",
+        json={"title": "另一个会话材料", "content": "这份材料不应该进入当前会话。", "make_active": True},
+    ).json()
+
+    turn = client.post(
+        "/api/personal/chat/turn",
+        json={"content": "先看这份材料", "source_uids": [first_source["source_uid"]]},
+    )
+    assert turn.status_code == 200, turn.text
+    session_uid = turn.json()["session"]["session_uid"]
+
+    context = PersonalContextBuilder(db_path, project_id=1).build(session_uid=session_uid, prompt="继续")
+
+    assert context["active_source_uids"] == [first_source["source_uid"]]
+    assert second_source["source_uid"] not in context["active_source_uids"]
 
 
 def test_bootstrap_cleans_polluted_db_records(tmp_path: Path, monkeypatch) -> None:
@@ -215,9 +256,9 @@ def test_personal_chat_turn_reuses_session(tmp_path: Path, monkeypatch) -> None:
 
 def test_personal_analysis_uses_llm_intent_route_and_answer(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_source(client)
+    source = _add_source(client)
 
-    answer = client.post("/api/personal/chat/turn", json={"content": "分析一下我现在的需求资料"})
+    answer = client.post("/api/personal/chat/turn", json={"content": "分析一下我现在的需求资料", "source_uids": [source["source_uid"]]})
     assert answer.status_code == 200, answer.json()
     message = answer.json()["message"]
     route = message["metadata"]["intent_route"]
@@ -295,9 +336,9 @@ def test_personal_chat_turn_rejects_too_many_attached_sources(tmp_path: Path, mo
 
 def test_personal_document_generation_uses_llm_route_and_skill_generation(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_source(client)
+    source = _add_source(client)
 
-    answer = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    answer = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告", "source_uids": [source["source_uid"]]})
     assert answer.status_code == 200
     message = answer.json()["message"]
     route = message["metadata"]["intent_route"]
@@ -320,10 +361,10 @@ def test_personal_document_generation_uses_llm_route_and_skill_generation(tmp_pa
 
 def test_chat_and_unified_turn_document_generation_are_equivalent(tmp_path: Path, monkeypatch) -> None:
     client, _db_path, _ = _client(tmp_path, monkeypatch)
-    _add_source(client)
+    source = _add_source(client)
 
-    chat = client.post("/api/personal/chat/turn", json={"content": "生成详细设计文档"})
-    unified = client.post("/api/agent/unified-turn", json={"content": "生成详细设计文档"})
+    chat = client.post("/api/personal/chat/turn", json={"content": "生成详细设计文档", "source_uids": [source["source_uid"]]})
+    unified = client.post("/api/agent/unified-turn", json={"content": "生成详细设计文档", "source_uids": [source["source_uid"]]})
 
     assert chat.status_code == 200, chat.json()
     assert unified.status_code == 200, unified.json()
@@ -403,9 +444,9 @@ def test_chat_document_quality_failure_returns_failed_draft_and_skill_candidate(
 
     monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_source(client)
+    source = _add_source(client)
 
-    answer = client.post("/api/personal/chat/turn", json={"content": "生成功能规范"})
+    answer = client.post("/api/personal/chat/turn", json={"content": "生成功能规范", "source_uids": [source["source_uid"]]})
     assert answer.status_code == 200, answer.json()
     message = answer.json()["message"]
     draft = message["metadata"]["draft"]
@@ -462,9 +503,9 @@ def test_quality_failed_draft_remains_active_for_followup_revision(tmp_path: Pat
 
     monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_source(client)
+    source = _add_source(client)
 
-    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告", "source_uids": [source["source_uid"]]})
     assert generated.status_code == 200, generated.json()
     session_uid = generated.json()["session"]["session_uid"]
     draft_uid = generated.json()["message"]["metadata"]["draft"]["draft_uid"]
@@ -519,9 +560,9 @@ def test_low_confidence_route_does_not_execute_generation(tmp_path: Path, monkey
 
 def test_active_draft_can_be_revised_via_llm_route(tmp_path: Path, monkeypatch) -> None:
     client, _, _ = _client(tmp_path, monkeypatch)
-    _add_source(client)
+    source = _add_source(client)
 
-    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告", "source_uids": [source["source_uid"]]})
     assert generated.status_code == 200
     session_uid = generated.json()["session"]["session_uid"]
     draft_uid = generated.json()["message"]["metadata"]["draft"]["draft_uid"]
@@ -728,9 +769,9 @@ def test_unified_turn_answer_only_route_does_not_create_document_by_local_keywor
 
 def test_active_draft_is_not_reused_across_sessions(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
-    _add_source(client)
+    source = _add_source(client)
 
-    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
+    generated = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告", "source_uids": [source["source_uid"]]})
     assert generated.status_code == 200
 
     revised = client.post("/api/personal/chat/turn", json={"content": "把刚才草稿补充异常场景"})
@@ -760,17 +801,83 @@ def test_personal_session_management(tmp_path: Path, monkeypatch) -> None:
 
 def test_personal_llm_config_writes_personal_env_keys(tmp_path: Path, monkeypatch) -> None:
     client, _, workspace = _client(tmp_path, monkeypatch)
+    (workspace / ".env").write_text("OPENROUTER_API_KEY=old-openrouter\nXAI_API_KEY=old-xai\n", encoding="utf-8")
+    monkeypatch.setattr(
+        llm_admin_module,
+        "_fetch_provider_model_ids",
+        lambda provider, api_key: {
+            "deepseek": ["deepseek-v4-flash"],
+            "dashscope": ["qwen3-coder-plus"],
+            "mimo": ["mimo-v2.5", "mimo-v2.5-pro"],
+        }.get(provider, []),
+    )
 
     saved = client.put(
         "/api/personal/llm-config",
         json={
-            "provider": "openrouter",
-            "model": "openai/gpt-4o-mini",
-            "api_key": "test-openrouter-key",
+            "provider": "mimo",
+            "model": "mimo-v2.5-pro",
+            "api_key": "test-mimo-key",
             "clear_other_provider_keys": True,
         },
     )
     assert saved.status_code == 200
+    providers = [item["value"] for item in saved.json()["available_providers"]]
+    assert providers == ["deepseek", "dashscope", "mimo"]
+    mimo_provider = next(item for item in saved.json()["available_providers"] if item["value"] == "mimo")
+    assert mimo_provider["default_model"] == "mimo-v2.5-pro"
+    assert mimo_provider["model_options"] == ["mimo-v2.5", "mimo-v2.5-pro"]
     env_text = (workspace / ".env").read_text(encoding="utf-8")
-    assert "PERSONAL_AGENT_LLM_PROVIDER=openrouter" in env_text
-    assert "PERSONAL_AGENT_LLM_MODEL=openai/gpt-4o-mini" in env_text
+    assert "PERSONAL_AGENT_LLM_PROVIDER=mimo" in env_text
+    assert "PERSONAL_AGENT_LLM_MODEL=mimo-v2.5-pro" in env_text
+    assert "MIMO_API_KEY=test-mimo-key" in env_text
+    assert "OPENROUTER_API_KEY" not in env_text
+    assert "XAI_API_KEY" not in env_text
+
+
+def test_personal_env_ignores_retired_llm_provider(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("PERSONAL_AGENT_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    env_path = tmp_path / ".env"
+    env_path.write_text("PERSONAL_AGENT_LLM_PROVIDER=openrouter\nMIMO_API_KEY=test-mimo-key\n", encoding="utf-8")
+
+    load_personal_env(env_path)
+
+    assert "PERSONAL_AGENT_LLM_PROVIDER" not in os.environ
+    assert os.environ["MIMO_API_KEY"] == "test-mimo-key"
+
+
+def test_personal_llm_config_discovers_model_options_for_all_supported_providers(tmp_path: Path, monkeypatch) -> None:
+    for key in [
+        "PERSONAL_AGENT_LLM_PROVIDER",
+        "PERSONAL_AGENT_LLM_MODEL",
+        "DEEPSEEK_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "MIMO_API_KEY",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+    db_path = tmp_path / "agent.db"
+    init_db(db_path)
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "DEEPSEEK_API_KEY=deepseek-key",
+                "DASHSCOPE_API_KEY=dashscope-key",
+                "MIMO_API_KEY=mimo-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        llm_admin_module,
+        "_fetch_provider_model_ids",
+        lambda provider, api_key: [f"{provider}-model-a", f"{provider}-model-b"],
+    )
+
+    config = llm_admin_module.read_personal_llm_admin_config(db_path, env_path)
+
+    options = {item["value"]: item["model_options"] for item in config["available_providers"]}
+    assert options["deepseek"] == ["deepseek-v4-flash", "deepseek-model-a", "deepseek-model-b"]
+    assert options["dashscope"] == ["qwen3-coder-plus", "dashscope-model-a", "dashscope-model-b"]
+    assert options["mimo"] == ["mimo-v2.5-pro", "mimo-model-a", "mimo-model-b"]

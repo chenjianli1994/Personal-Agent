@@ -1,5 +1,6 @@
 import {
   Alert,
+  AutoComplete,
   Button,
   Checkbox,
   Divider,
@@ -2123,6 +2124,8 @@ function LlmConfigPanel({
   const runtime = status ?? config?.status;
   const options = config?.available_providers ?? [];
   const selectedOption = options.find((item) => item.value === provider);
+  const modelOptions = (selectedOption?.model_options?.length ? selectedOption.model_options : selectedOption?.default_model ? [selectedOption.default_model] : [])
+    .map((item) => ({ value: item }));
   const isConfigured = Boolean(runtime?.configured);
 
   useEffect(() => {
@@ -2150,7 +2153,15 @@ function LlmConfigPanel({
           setModel(next?.default_model || "");
         }}
       />
-      <Input value={model} onChange={(event) => setModel(event.target.value)} placeholder={selectedOption?.default_model || "model"} />
+      <AutoComplete
+        className="full-width"
+        style={{ width: "100%" }}
+        value={model}
+        options={modelOptions}
+        onChange={setModel}
+        placeholder={selectedOption?.default_model ? `选择或输入模型，例如 ${selectedOption.default_model}` : "选择或输入模型"}
+        filterOption={false}
+      />
       <Input.Password value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="API Key，留空则保留已保存密钥" />
       <Button
         type="primary"

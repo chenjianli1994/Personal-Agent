@@ -604,15 +604,7 @@ def _load_sources(db_path: Path, *, project_id: int, source_uids: list[str] | No
                 (project_id, *source_uids),
             ).fetchall()
         else:
-            rows = conn.execute(
-                """
-                SELECT source_uid, title, plain_text, sections_json, tables_json
-                FROM personal_input_sources
-                WHERE project_id=? AND status='active' AND is_active=1
-                ORDER BY id DESC
-                """,
-                (project_id,),
-            ).fetchall()
+            rows = []
     return [
         {
             "source_uid": row["source_uid"],

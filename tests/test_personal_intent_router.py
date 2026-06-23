@@ -19,14 +19,16 @@ def test_llm_intent_router_classifies_document_generation(tmp_path: Path, monkey
     workspace.mkdir()
     client = TestClient(create_personal_app(db_path, workspace))
     context_payload = client.get("/api/personal/context").json()
-    client.post(
+    source = client.post(
         "/api/personal/sources/text",
         json={"title": "输入", "content": "需求：生成可验证行为说明。", "make_active": True},
     )
+    assert source.status_code == 200
 
     context = PersonalContextBuilder(db_path, context_payload["project_id"]).build(
         session_uid="session_test",
         prompt="生成需求分析报告",
+        source_uids=[source.json()["source_uid"]],
     )
     route = PersonalIntentRouter(db_path, context_payload["project_id"]).route(context)
     guarded = apply_personal_policy(route, context)
@@ -88,10 +90,10 @@ def test_policy_guard_blocks_direct_file_writes_and_marks_tool_confirmation() ->
 
 
 def test_llm_gateway_selects_fast_model_for_fast_purposes(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "openrouter")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
-    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL_FAST", "openai/gpt-4.1-mini")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "mimo")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL", "mimo-default")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL_FAST", "mimo-fast")
 
     db_path = tmp_path / "agent.db"
     init_db(db_path)
@@ -100,14 +102,15 @@ def test_llm_gateway_selects_fast_model_for_fast_purposes(tmp_path: Path, monkey
     fast_provider = gateway._select_provider(purpose="personal_intent_route")
     default_provider = gateway._select_provider(purpose="personal_artifact_generate")
 
-    assert fast_provider["model"] == "openai/gpt-4.1-mini"
-    assert default_provider["model"] == "openai/gpt-4o-mini"
+    assert fast_provider["model"] == "mimo-fast"
+    assert default_provider["model"] == "mimo-default"
+    assert fast_provider["base_url"] == "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
 
 
 def test_llm_gateway_fast_model_falls_back_to_default_when_not_configured(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "openrouter")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "mimo")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL", "mimo-default")
     monkeypatch.delenv("PERSONAL_AGENT_LLM_MODEL_FAST", raising=False)
 
     db_path = tmp_path / "agent.db"
@@ -116,7 +119,7 @@ def test_llm_gateway_fast_model_falls_back_to_default_when_not_configured(tmp_pa
 
     provider = gateway._select_provider(purpose="personal_learning_reflect")
 
-    assert provider["model"] == "openai/gpt-4o-mini"
+    assert provider["model"] == "mimo-default"
 
 
 def test_llm_gateway_defaults_to_deepseek(tmp_path: Path, monkeypatch) -> None:
@@ -145,6 +148,20 @@ def test_llm_gateway_rejects_unknown_explicit_provider_without_key_fallback(tmp_
         assert "Unsupported or unconfigured LLM provider" in str(exc)
     else:
         raise AssertionError("unknown explicit provider should not fall back to other configured keys")
+
+
+def test_llm_gateway_rejects_retired_openrouter_and_xai_providers(tmp_path: Path, monkeypatch) -> None:
+    gateway = PersonalLLMGateway(tmp_path / "agent.db")
+    for provider in ("openrouter", "xai"):
+        monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", provider)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+        monkeypatch.setenv("XAI_API_KEY", "test-xai-key")
+        try:
+            gateway._select_provider(purpose="personal_intent_route")
+        except PersonalLLMError as exc:
+            assert "Unsupported or unconfigured LLM provider" in str(exc)
+        else:
+            raise AssertionError(f"{provider} should be retired")
 
 
 def test_llm_gateway_rejects_fake_provider_without_test_switch(tmp_path: Path, monkeypatch) -> None:
@@ -176,17 +193,17 @@ def test_llm_gateway_fake_provider_ignores_tier_model_selection(tmp_path: Path, 
 
 
 def test_llm_gateway_logs_fast_tier_model_on_fast_purpose(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "openrouter")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
-    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL_FAST", "openai/gpt-4.1-mini")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "mimo")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL", "mimo-default")
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_MODEL_FAST", "mimo-fast")
 
     db_path = tmp_path / "agent.db"
     init_db(db_path)
     gateway = PersonalLLMGateway(db_path)
 
     def fake_chat_completion(provider: dict[str, str], system_prompt: str, user_prompt: str) -> str:
-        assert provider["model"] == "openai/gpt-4.1-mini"
+        assert provider["model"] == "mimo-fast"
         return '{"intent":"answer_only","confidence":1,"answer_mode":"general_chat","reason":"ok"}'
 
     monkeypatch.setattr(gateway, "_chat_completion", fake_chat_completion)
@@ -198,8 +215,8 @@ def test_llm_gateway_logs_fast_tier_model_on_fast_purpose(tmp_path: Path, monkey
         task_uid="session_test",
     )
 
-    assert result.model == "openai/gpt-4.1-mini"
+    assert result.model == "mimo-fast"
     with connect(db_path) as conn:
         row = conn.execute("SELECT purpose, model FROM llm_call_logs ORDER BY id DESC LIMIT 1").fetchone()
     assert row["purpose"] == "personal_intent_route"
-    assert row["model"] == "openai/gpt-4.1-mini"
+    assert row["model"] == "mimo-fast"

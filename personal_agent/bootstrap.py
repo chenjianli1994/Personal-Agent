@@ -24,12 +24,13 @@ PERSONAL_ENV_KEYS = {
     "PERSONAL_AGENT_LLM_MODEL",
     "DEEPSEEK_API_KEY",
     "DASHSCOPE_API_KEY",
-    "OPENROUTER_API_KEY",
-    "XAI_API_KEY",
+    "MIMO_API_KEY",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
 }
+
+RETIRED_PERSONAL_LLM_PROVIDERS = {"openrouter", "xai"}
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,10 @@ def load_personal_env(env_path: Path) -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         if key in PERSONAL_ENV_KEYS:
-            os.environ.setdefault(key, value.strip().strip('"'))
+            clean_value = value.strip().strip('"')
+            if key == "PERSONAL_AGENT_LLM_PROVIDER" and clean_value.lower() in RETIRED_PERSONAL_LLM_PROVIDERS:
+                continue
+            os.environ.setdefault(key, clean_value)
 
 
 def bootstrap_personal_agent(

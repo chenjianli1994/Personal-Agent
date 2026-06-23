@@ -199,7 +199,7 @@ class PersonalRuntime:
         reflection: dict[str, Any],
     ) -> dict[str, Any]:
         if self._should_start_dev_task(session_uid=session_uid, prompt=prompt, route=route):
-            return self._start_dev_task_turn(session_uid=session_uid, prompt=prompt, route=route)
+            return self._start_dev_task_turn(session_uid=session_uid, prompt=prompt, context=context, route=route)
         intent = str(route.get("intent") or "answer_only")
         if intent == "generate_document":
             return self._generate_document_turn(session_uid=session_uid, prompt=prompt, context=context, route=route, reflection=reflection)
@@ -262,8 +262,8 @@ class PersonalRuntime:
             return True
         return False
 
-    def _start_dev_task_turn(self, *, session_uid: str, prompt: str, route: dict[str, Any]) -> dict[str, Any]:
-        task = self.dev_tasks.start(session_uid=session_uid, prompt=prompt)
+    def _start_dev_task_turn(self, *, session_uid: str, prompt: str, context: dict[str, Any], route: dict[str, Any]) -> dict[str, Any]:
+        task = self.dev_tasks.start(session_uid=session_uid, prompt=prompt, source_uids=context["active_source_uids"])
         last_action = task.get("last_action") if isinstance(task.get("last_action"), dict) else {}
         status = str(last_action.get("status") or task.get("status") or "")
         stage = str(last_action.get("stage") or (task.get("next_action") or {}).get("stage") or "")

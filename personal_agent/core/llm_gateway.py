@@ -139,23 +139,14 @@ class PersonalLLMGateway:
                 "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                 "model": model or "qwen3-coder-plus",
             }
-        if provider_name == "openrouter":
-            if not os.environ.get("OPENROUTER_API_KEY"):
-                raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=openrouter requires OPENROUTER_API_KEY.")
+        if provider_name == "mimo":
+            if not os.environ.get("MIMO_API_KEY"):
+                raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=mimo requires MIMO_API_KEY.")
             return {
-                "name": "openrouter",
-                "api_key": os.environ["OPENROUTER_API_KEY"],
-                "base_url": "https://openrouter.ai/api/v1/chat/completions",
-                "model": model or "openai/gpt-4o-mini",
-            }
-        if provider_name == "xai":
-            if not os.environ.get("XAI_API_KEY"):
-                raise PersonalLLMError("LLM_NOT_CONFIGURED", "PERSONAL_AGENT_LLM_PROVIDER=xai requires XAI_API_KEY.")
-            return {
-                "name": "xai",
-                "api_key": os.environ["XAI_API_KEY"],
-                "base_url": "https://api.x.ai/v1/chat/completions",
-                "model": model or "grok-3-mini",
+                "name": "mimo",
+                "api_key": os.environ["MIMO_API_KEY"],
+                "base_url": "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+                "model": model or "mimo-v2.5-pro",
             }
         raise PersonalLLMError("LLM_NOT_CONFIGURED", "Unsupported or unconfigured LLM provider. DeepSeek is the default; set DEEPSEEK_API_KEY.")
 
@@ -177,8 +168,7 @@ class PersonalLLMGateway:
         provider_key = {
             "deepseek": "DEEPSEEK_API_KEY",
             "dashscope": "DASHSCOPE_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-            "xai": "XAI_API_KEY",
+            "mimo": "MIMO_API_KEY",
         }.get(provider_name, "")
         if provider_key and os.environ.get(provider_key):
             return f"env:{provider_key}"

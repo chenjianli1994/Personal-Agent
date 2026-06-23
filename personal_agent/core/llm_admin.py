@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
+import time
+import urllib.error
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,32 +18,43 @@ LLM_ENV_KEYS = [
     "PERSONAL_AGENT_LLM_MODEL",
     "DEEPSEEK_API_KEY",
     "DASHSCOPE_API_KEY",
+    "MIMO_API_KEY",
+]
+
+RETIRED_LLM_ENV_KEYS = {
     "OPENROUTER_API_KEY",
     "XAI_API_KEY",
-]
+}
 
 PROVIDER_KEY_NAMES = {
     "deepseek": "DEEPSEEK_API_KEY",
     "dashscope": "DASHSCOPE_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "xai": "XAI_API_KEY",
+    "mimo": "MIMO_API_KEY",
 }
 
 DEFAULT_MODELS = {
     "deepseek": "deepseek-v4-flash",
     "dashscope": "qwen3-coder-plus",
-    "openrouter": "openai/gpt-4o-mini",
-    "xai": "grok-3-mini",
+    "mimo": "mimo-v2.5-pro",
 }
 
 RESTART_EXIT_CODE = 42
 BACKEND_STARTED_AT = datetime.now(UTC).isoformat()
+PROVIDER_MODELS_URLS = {
+    "deepseek": "https://api.deepseek.com/models",
+    "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+    "mimo": "https://token-plan-cn.xiaomimimo.com/v1/models",
+}
+MODEL_OPTIONS_CACHE_TTL_S = 600
+_MODEL_OPTIONS_CACHE: dict[str, tuple[float, list[str]]] = {}
 
 
 def read_personal_llm_admin_config(db_path: Path, env_path: Path | None = None) -> dict[str, Any]:
     env_path = env_path or _default_env_path()
     file_env = _read_env_file(env_path)
     provider = _env_value(file_env, "PERSONAL_AGENT_LLM_PROVIDER") or _infer_provider(file_env)
+    if provider not in PROVIDER_KEY_NAMES:
+        provider = _infer_provider(file_env)
     model = _env_value(file_env, "PERSONAL_AGENT_LLM_MODEL") or DEFAULT_MODELS.get(provider, "")
     status = PersonalLLMGateway(db_path).status()
     api_key_name = PROVIDER_KEY_NAMES.get(provider, "")
@@ -50,10 +65,9 @@ def read_personal_llm_admin_config(db_path: Path, env_path: Path | None = None) 
         "api_key_configured": bool(api_key_name and _env_value(file_env, api_key_name)),
         "env_file": str(env_path.resolve()),
         "available_providers": [
-            {"value": "deepseek", "label": "DeepSeek 官方", "default_model": DEFAULT_MODELS["deepseek"]},
-            {"value": "dashscope", "label": "DashScope", "default_model": DEFAULT_MODELS["dashscope"]},
-            {"value": "openrouter", "label": "OpenRouter", "default_model": DEFAULT_MODELS["openrouter"]},
-            {"value": "xai", "label": "xAI", "default_model": DEFAULT_MODELS["xai"]},
+            _provider_option("deepseek", "DeepSeek 官方", file_env),
+            _provider_option("dashscope", "DashScope", file_env),
+            _provider_option("mimo", "Mimo", file_env),
         ],
         "status": status,
         "restart_exit_code": RESTART_EXIT_CODE,
@@ -93,6 +107,8 @@ def save_personal_llm_admin_config(
     for key in LLM_ENV_KEYS:
         if key in env:
             os.environ[key] = env[key]
+    for key in RETIRED_LLM_ENV_KEYS:
+        os.environ.pop(key, None)
     return read_personal_llm_admin_config(db_path, env_path)
 
 
@@ -118,6 +134,51 @@ def _infer_provider(env: dict[str, str]) -> str:
     return "deepseek"
 
 
+def _provider_option(provider: str, label: str, env: dict[str, str]) -> dict[str, Any]:
+    key_name = PROVIDER_KEY_NAMES.get(provider, "")
+    api_key = _env_value(env, key_name) if key_name else ""
+    default_model = DEFAULT_MODELS[provider]
+    return {
+        "value": provider,
+        "label": label,
+        "default_model": default_model,
+        "model_options": _model_options(provider, api_key, default_model),
+    }
+
+
+def _model_options(provider: str, api_key: str, default_model: str) -> list[str]:
+    if not api_key:
+        return [default_model]
+    options = _fetch_provider_model_ids(provider, api_key)
+    if default_model not in options:
+        options.insert(0, default_model)
+    return options
+
+
+def _fetch_provider_model_ids(provider: str, api_key: str) -> list[str]:
+    models_url = PROVIDER_MODELS_URLS.get(provider, "")
+    if not models_url:
+        return []
+    cache_key = f"{provider}:{api_key[:8]}:{api_key[-8:]}"
+    cached = _MODEL_OPTIONS_CACHE.get(cache_key)
+    now = time.time()
+    if cached and now - cached[0] < MODEL_OPTIONS_CACHE_TTL_S:
+        return list(cached[1])
+    try:
+        req = urllib.request.Request(models_url, headers={"Authorization": f"Bearer {api_key}"})
+        with urllib.request.urlopen(req, timeout=6) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        options = [
+            str(item.get("id") or "").strip()
+            for item in body.get("data", [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ]
+    except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
+        options = []
+    _MODEL_OPTIONS_CACHE[cache_key] = (now, options)
+    return list(options)
+
+
 def _env_value(env: dict[str, str], key: str) -> str:
     return os.environ.get(key) or env.get(key, "")
 
@@ -139,6 +200,8 @@ def _write_env_file(path: Path, env: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = _read_env_file(path)
     existing.update(env)
+    for key in RETIRED_LLM_ENV_KEYS:
+        existing.pop(key, None)
     ordered_keys = [
         "PERSONAL_AGENT_DB",
         "PERSONAL_AGENT_PORT",
