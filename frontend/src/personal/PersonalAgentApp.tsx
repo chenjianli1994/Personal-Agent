@@ -33,6 +33,7 @@ import type {
   PatchDirectiveInput,
   PersonalArtifactDraft,
   PersonalCodebaseConfig,
+  PersonalDevTask,
   PersonalInputSource,
   PersonalInboxItem,
   PersonalKnowledgeItem,
@@ -47,6 +48,15 @@ import type {
 import "../styles/personal-agent.css";
 
 type DraftReviewTab = "preview" | "revise" | "versions" | "quality";
+const NEW_SESSION_KEY = "__new_session__";
+
+type ChatTurnVariables = {
+  body: Parameters<typeof personalAgentApi.chatTurn>[0];
+  sessionKey: string;
+  signal: AbortSignal;
+  restoreDraft?: string;
+  clearAttachmentsOnSuccess?: boolean;
+};
 
 export function PersonalAgentApp() {
   const queryClient = useQueryClient();
@@ -56,20 +66,24 @@ export function PersonalAgentApp() {
   const [attachmentsUploading, setAttachmentsUploading] = useState(false);
   const [inputHistory, setInputHistory] = useState<string[]>([]);
   const [inputHistoryIndex, setInputHistoryIndex] = useState<number | null>(null);
-  const [optimistic, setOptimistic] = useState<LocalMessage[]>([]);
-  const [localError, setLocalError] = useState("");
+  const [optimisticBySession, setOptimisticBySession] = useState<Record<string, LocalMessage[]>>({});
+  const [localErrorBySession, setLocalErrorBySession] = useState<Record<string, string>>({});
+  const [pendingChatSessionKey, setPendingChatSessionKey] = useState<string>();
   const [llmSettingsOpen, setLlmSettingsOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [draftsOpen, setDraftsOpen] = useState(false);
+  const [tasksOpen, setTasksOpen] = useState(false);
   const [knowledgeOpen, setKnowledgeOpen] = useState(false);
   const [learningOpen, setLearningOpen] = useState(false);
   const [codebaseOpen, setCodebaseOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [draftToOpenUid, setDraftToOpenUid] = useState<string>();
   const [draftPanelTab, setDraftPanelTab] = useState<"create" | "current">("create");
+  const [draftFilterMode, setDraftFilterMode] = useState<"all" | "session" | "task">("session");
   const [renamingSession, setRenamingSession] = useState<PersonalSession>();
   const [renameTitle, setRenameTitle] = useState("");
   const hasAutoSelected = useRef(false);
+  const chatAbortControllerRef = useRef<AbortController | null>(null);
 
   const contextQuery = useQuery({ queryKey: ["personal-context"], queryFn: personalAgentApi.context, retry: false });
   const llmConfigQuery = useQuery({ queryKey: ["personal-llm-config"], queryFn: personalAgentApi.llmConfig, retry: false, refetchInterval: 15000 });
@@ -81,6 +95,16 @@ export function PersonalAgentApp() {
     queryFn: () => personalAgentApi.session(selectedSessionUid!),
     enabled: Boolean(selectedSessionUid),
     retry: false
+  });
+  const currentTaskQuery = useQuery({
+    queryKey: ["personal-dev-task-current", selectedSessionUid],
+    enabled: Boolean(selectedSessionUid),
+    retry: false,
+    refetchInterval: 10000,
+    queryFn: async () => {
+      const tasks = await personalAgentApi.devTaskList(selectedSessionUid);
+      return pickCurrentTask(tasks);
+    }
   });
 
   const saveLlmConfig = useMutation({
@@ -96,14 +120,18 @@ export function PersonalAgentApp() {
   });
 
   const chatTurn = useMutation({
-    mutationFn: personalAgentApi.chatTurn,
-    onSuccess: (result) => {
+    mutationFn: ({ body, signal }: ChatTurnVariables) => personalAgentApi.chatTurn(body, { signal }),
+    onSuccess: (result, variables) => {
       setSelectedSessionUid(result.session.session_uid);
-      setOptimistic([]);
-      setLocalError("");
+      setOptimisticBySession((items) => omitKey(items, variables.sessionKey));
+      setLocalErrorBySession((items) => omitKey(items, variables.sessionKey));
+      setPendingChatSessionKey((value) => (value === variables.sessionKey ? undefined : value));
+      chatAbortControllerRef.current = null;
+      if (variables.clearAttachmentsOnSuccess) setAttachments([]);
       queryClient.setQueryData(["personal-session", result.session.session_uid], result.session);
       queryClient.invalidateQueries({ queryKey: ["personal-sessions"] });
       queryClient.invalidateQueries({ queryKey: ["personal-drafts"] });
+      queryClient.invalidateQueries({ queryKey: ["personal-dev-task-current"] });
       const learningReflection = result.message?.metadata?.learning_reflection as { candidate_id?: number | null } | undefined;
       if (learningReflection?.candidate_id) {
         queryClient.invalidateQueries({ queryKey: ["personal-learning-summary"] });
@@ -111,11 +139,25 @@ export function PersonalAgentApp() {
         queryClient.invalidateQueries({ queryKey: ["personal-knowledge"] });
       }
     },
-    onError: (error) => {
+    onError: (error, variables) => {
+      setPendingChatSessionKey((value) => (value === variables.sessionKey ? undefined : value));
+      chatAbortControllerRef.current = null;
+      if (isAbortError(error)) {
+        if (variables.restoreDraft) setDraft(variables.restoreDraft);
+        setOptimisticBySession((items) => omitKey(items, variables.sessionKey));
+        setLocalErrorBySession((items) => ({ ...items, [variables.sessionKey]: "已停止本次回复。" }));
+        return;
+      }
       const text = error instanceof Error ? error.message : String(error);
-      setLocalError(text);
+      if (variables.restoreDraft) setDraft(variables.restoreDraft);
+      setLocalErrorBySession((items) => ({ ...items, [variables.sessionKey]: text }));
       message.error(text);
-      setOptimistic((items) => items.map((item) => (item.pending ? { ...item, content: `发送失败：${text}`, pending: false } : item)));
+      setOptimisticBySession((items) => ({
+        ...items,
+        [variables.sessionKey]: (items[variables.sessionKey] ?? []).map((item) =>
+          item.pending ? { ...item, content: `发送失败：${text}`, pending: false } : item
+        )
+      }));
     }
   });
   const openDraftFile = useMutation({
@@ -145,10 +187,11 @@ export function PersonalAgentApp() {
       const remaining = (sessionsQuery.data ?? []).filter((item) => item.session_uid !== result.session_uid);
       queryClient.setQueryData(["personal-sessions"], remaining);
       queryClient.removeQueries({ queryKey: ["personal-session", result.session_uid] });
+      setOptimisticBySession((items) => omitKey(items, result.session_uid));
+      setLocalErrorBySession((items) => omitKey(items, result.session_uid));
+      if (pendingChatSessionKey === result.session_uid) chatAbortControllerRef.current?.abort();
       if (selectedSessionUid === result.session_uid) {
         setSelectedSessionUid(remaining[0]?.session_uid);
-        setOptimistic([]);
-        setLocalError("");
       }
     },
     onError: (error) => message.error(error instanceof Error ? error.message : String(error))
@@ -161,10 +204,11 @@ export function PersonalAgentApp() {
       const remaining = (sessionsQuery.data ?? []).filter((item) => !deleted.has(item.session_uid));
       queryClient.setQueryData(["personal-sessions"], remaining);
       sessionUids.forEach((sessionUid) => queryClient.removeQueries({ queryKey: ["personal-session", sessionUid] }));
+      setOptimisticBySession((items) => omitKeys(items, sessionUids));
+      setLocalErrorBySession((items) => omitKeys(items, sessionUids));
+      if (pendingChatSessionKey && deleted.has(pendingChatSessionKey)) chatAbortControllerRef.current?.abort();
       if (selectedSessionUid && deleted.has(selectedSessionUid)) {
         setSelectedSessionUid(remaining[0]?.session_uid);
-        setOptimistic([]);
-        setLocalError("");
       }
     },
     onError: (error) => message.error(error instanceof Error ? error.message : String(error))
@@ -172,6 +216,12 @@ export function PersonalAgentApp() {
 
   const sessions = sessionsQuery.data ?? [];
   const selectedSession = selectedSessionQuery.data ?? sessions.find((session) => session.session_uid === selectedSessionUid);
+  const currentTask = currentTaskQuery.data as PersonalDevTask | undefined;
+  const activeSessionKey = selectedSessionUid ?? NEW_SESSION_KEY;
+  const optimistic = optimisticBySession[activeSessionKey] ?? [];
+  const localError = localErrorBySession[activeSessionKey] ?? "";
+  const sending = pendingChatSessionKey === activeSessionKey && chatTurn.isPending;
+  const sendDisabled = Boolean(pendingChatSessionKey && pendingChatSessionKey !== activeSessionKey);
 
   useEffect(() => {
     if (!hasAutoSelected.current && !selectedSessionUid && sessions[0]) {
@@ -205,18 +255,55 @@ export function PersonalAgentApp() {
     setAttachments((items) => items.filter((item) => item.id !== id));
   };
 
+  const startChatTurn = ({
+    content,
+    sourceUids = [],
+    optimisticMessages,
+    restoreDraft,
+    clearAttachmentsOnSuccess = false
+  }: {
+    content: string;
+    sourceUids?: string[];
+    optimisticMessages?: LocalMessage[];
+    restoreDraft?: string;
+    clearAttachmentsOnSuccess?: boolean;
+  }) => {
+    const sessionKey = selectedSessionUid ?? NEW_SESSION_KEY;
+    if (pendingChatSessionKey || attachmentsUploading) return false;
+    const controller = new AbortController();
+    chatAbortControllerRef.current = controller;
+    setPendingChatSessionKey(sessionKey);
+    setLocalErrorBySession((items) => omitKey(items, sessionKey));
+    if (optimisticMessages) {
+      setOptimisticBySession((items) => ({ ...items, [sessionKey]: optimisticMessages }));
+    }
+    chatTurn.mutate({
+      body: { session_uid: selectedSessionUid, content, source_uids: sourceUids },
+      sessionKey,
+      signal: controller.signal,
+      restoreDraft,
+      clearAttachmentsOnSuccess
+    });
+    return true;
+  };
+
+  const cancelChatTurn = () => {
+    if (!pendingChatSessionKey) return;
+    chatAbortControllerRef.current?.abort();
+  };
+
   const send = async () => {
     const content = draft.trim();
     if (!content) {
       if (attachments.length) message.warning("请输入对附件的分析指令。");
       return;
     }
-    if (chatTurn.isPending || attachmentsUploading) return;
+    if (pendingChatSessionKey || attachmentsUploading) return;
     const now = new Date().toISOString();
     setInputHistory((items) => [content, ...items.filter((item) => item !== content)].slice(0, 50));
     setInputHistoryIndex(null);
     setDraft("");
-    setLocalError("");
+    setLocalErrorBySession((items) => omitKey(items, activeSessionKey));
     let sourceUids: string[] = [];
     if (attachments.length) {
       setAttachmentsUploading(true);
@@ -235,7 +322,7 @@ export function PersonalAgentApp() {
         sourceUids = uploaded;
       } catch (error) {
         const text = error instanceof Error ? error.message : String(error);
-        setLocalError(text);
+        setLocalErrorBySession((items) => ({ ...items, [activeSessionKey]: text }));
         message.error(text);
         setAttachments((items) => items.map((item) => (item.status === "uploading" ? { ...item, status: "error", error: text } : item)));
         setDraft(content);
@@ -250,22 +337,17 @@ export function PersonalAgentApp() {
       source_type: item.file.name.split(".").pop()?.toLowerCase() || "file",
       original_name: item.file.name,
     }));
-    setOptimistic([
-      { role: "user", content, created_at: now, metadata: optimisticAttachments.length ? { attachments: optimisticAttachments } : {} },
-      { role: "assistant", content: "Agent 正在思考。", created_at: now, pending: true }
-    ]);
-    chatTurn.mutate(
-      { session_uid: selectedSessionUid, content, source_uids: sourceUids },
-      {
-        onError: () => {
-          setDraft(content);
-        },
-        onSuccess: () => {
-          setAttachments([]);
-          queryClient.invalidateQueries({ queryKey: ["personal-sources"] });
-        }
-      }
-    );
+    startChatTurn({
+      content,
+      sourceUids,
+      optimisticMessages: [
+        { role: "user", content, created_at: now, metadata: optimisticAttachments.length ? { attachments: optimisticAttachments } : {} },
+        { role: "assistant", content: "Agent 正在思考。", created_at: now, pending: true }
+      ],
+      restoreDraft: content,
+      clearAttachmentsOnSuccess: true
+    });
+    queryClient.invalidateQueries({ queryKey: ["personal-sources"] });
   };
 
   const loading = contextQuery.isLoading || llmConfigQuery.isLoading || llmStatusQuery.isLoading || sessionsQuery.isLoading;
@@ -312,8 +394,8 @@ export function PersonalAgentApp() {
           bulkDeleting={deleteSessions.isPending}
           onNew={() => {
             setSelectedSessionUid(undefined);
-            setOptimistic([]);
-            setLocalError("");
+            setLocalErrorBySession((items) => omitKey(items, NEW_SESSION_KEY));
+            setOptimisticBySession((items) => omitKey(items, NEW_SESSION_KEY));
           }}
         />
       </Layout.Sider>
@@ -332,17 +414,26 @@ export function PersonalAgentApp() {
           setInputHistoryIndex={setInputHistoryIndex}
           onSend={send}
           onRetry={send}
-          sending={chatTurn.isPending}
+          sending={sending}
+          sendDisabled={sendDisabled}
+          onCancelSend={cancelChatTurn}
           localError={localError}
           llmStatus={llmStatusQuery.data}
+          currentTask={currentTask}
           onOpenLlmSettings={() => setLlmSettingsOpen(true)}
           onOpenSources={() => setSourcesOpen(true)}
           onOpenDrafts={(draftUid) => {
             setDraftToOpenUid(draftUid);
             setDraftPanelTab("current");
+            setDraftFilterMode(draftUid && currentTask?.task_uid ? "task" : selectedSessionUid ? "session" : "all");
             setDraftsOpen(true);
           }}
           onOpenDraftFile={(draftUid) => openDraftFile.mutate(draftUid)}
+          onOpenTasks={() => setTasksOpen(true)}
+          onContinueTask={() => {
+            if (!selectedSessionUid) return;
+            startChatTurn({ content: "继续" });
+          }}
           onOpenKnowledge={() => setKnowledgeOpen(true)}
           onOpenLearning={() => setLearningOpen(true)}
           onOpenCodebase={() => setCodebaseOpen(true)}
@@ -366,6 +457,21 @@ export function PersonalAgentApp() {
           activeTab={draftPanelTab}
           onTabChange={setDraftPanelTab}
           selectedSessionUid={selectedSessionUid}
+          currentTask={currentTask}
+          filterMode={draftFilterMode}
+          onFilterModeChange={setDraftFilterMode}
+        />
+      </Drawer>
+      <Drawer title="任务" open={tasksOpen} onClose={() => setTasksOpen(false)} width={760}>
+        <DevTasksPanel
+          selectedSessionUid={selectedSessionUid}
+          currentTaskUid={currentTask?.task_uid}
+          onOpenDrafts={(draftUid) => {
+            setDraftToOpenUid(draftUid);
+            setDraftPanelTab("current");
+            setDraftFilterMode(currentTask?.task_uid ? "task" : selectedSessionUid ? "session" : "all");
+            setDraftsOpen(true);
+          }}
         />
       </Drawer>
       <Drawer title="知识库" open={knowledgeOpen} onClose={() => setKnowledgeOpen(false)} width={820}>
@@ -793,12 +899,18 @@ function ArtifactDraftsPanel({
   openDraftUid,
   activeTab,
   onTabChange,
-  selectedSessionUid
+  selectedSessionUid,
+  currentTask,
+  filterMode,
+  onFilterModeChange
 }: {
   openDraftUid?: string;
   activeTab: "create" | "current";
   onTabChange: (value: "create" | "current") => void;
   selectedSessionUid?: string;
+  currentTask?: PersonalDevTask;
+  filterMode: "all" | "session" | "task";
+  onFilterModeChange: (value: "all" | "session" | "task") => void;
 }) {
   const queryClient = useQueryClient();
   const [draftTitle, setDraftTitle] = useState("");
@@ -813,10 +925,12 @@ function ArtifactDraftsPanel({
   const [selectedRevisionIndex, setSelectedRevisionIndex] = useState<number>();
   const [exportFormat, setExportFormat] = useState("");
   const [compareRevisionIndex, setCompareRevisionIndex] = useState<number>();
+  const draftTaskUid = filterMode === "task" ? currentTask?.task_uid || "" : "";
+  const draftSessionUid = filterMode === "session" ? selectedSessionUid || "" : "";
 
   const draftsQuery = useQuery({
-    queryKey: ["personal-drafts", selectedSessionUid || ""],
-    queryFn: () => personalAgentApi.draftList(selectedSessionUid),
+    queryKey: ["personal-drafts", draftSessionUid, draftTaskUid, filterMode],
+    queryFn: () => personalAgentApi.draftList(draftSessionUid || undefined, draftTaskUid || undefined),
     retry: false
   });
   const sourcesQuery = useQuery({ queryKey: ["personal-sources"], queryFn: personalAgentApi.sources, retry: false });
@@ -847,6 +961,12 @@ function ArtifactDraftsPanel({
       setCompareRevisionIndex(undefined);
     }
   }, [openDraftUid]);
+
+  useEffect(() => {
+    if (filterMode === "task" && !currentTask?.task_uid) {
+      onFilterModeChange(selectedSessionUid ? "session" : "all");
+    }
+  }, [currentTask?.task_uid, filterMode, onFilterModeChange, selectedSessionUid]);
 
   useEffect(() => {
     if (draftDetail?.content !== undefined) {
@@ -919,7 +1039,12 @@ function ArtifactDraftsPanel({
     mutationFn: (draft: PersonalArtifactDraft) => {
       const prompt = `重新生成${documentLabel(draft.document_type)}：${draft.title}`;
       if (draft.document_type === "unit_test_code_or_diff") {
-        return personalAgentApi.proposeUnitTestCodeDraft({ prompt, source_uids: draft.source_uid ? [draft.source_uid] : [] });
+        return personalAgentApi.proposeUnitTestCodeDraft({
+          prompt,
+          session_uid: draft.session_uid,
+          task_uid: draft.task_uid,
+          source_uids: draft.source_uid ? [draft.source_uid] : []
+        });
       }
       if (draft.document_type === "c_code_diff") {
         return personalAgentApi.createDraft({
@@ -928,11 +1053,19 @@ function ArtifactDraftsPanel({
           content: draft.content || "",
           content_format: draft.content_format,
           source_uid: draft.source_uid,
+          session_uid: draft.session_uid,
+          task_uid: draft.task_uid,
           metadata: { regenerated_from: draft.draft_uid, boundary: "copied_diff_draft_without_apply" },
           make_active: true
         });
       }
-      return personalAgentApi.proposeDocumentDraft({ prompt, document_type: draft.document_type, source_uids: draft.source_uid ? [draft.source_uid] : [] });
+      return personalAgentApi.proposeDocumentDraft({
+        prompt,
+        document_type: draft.document_type,
+        session_uid: draft.session_uid,
+        task_uid: draft.task_uid,
+        source_uids: draft.source_uid ? [draft.source_uid] : []
+      });
     },
     onSuccess: (draft) => {
       refreshDrafts(draft);
@@ -984,6 +1117,8 @@ function ArtifactDraftsPanel({
                     content: draftContent,
                     content_format: contentFormat,
                     source_uid: sourceUid || undefined,
+                    session_uid: selectedSessionUid,
+                    task_uid: currentTask?.task_uid,
                     make_active: true
                   })}
                 >
@@ -998,6 +1133,23 @@ function ArtifactDraftsPanel({
             children: (
               <div className="artifact-layout">
                 <div className="artifact-list">
+                  <Space direction="vertical" size={10} className="full-width">
+                    <Select
+                      value={filterMode}
+                      onChange={(value) => onFilterModeChange(value)}
+                      options={[
+                        { value: "all", label: "全部" },
+                        { value: "session", label: "当前 session", disabled: !selectedSessionUid },
+                        { value: "task", label: "当前 task", disabled: !currentTask?.task_uid },
+                      ]}
+                    />
+                    <Typography.Text type="secondary" className="personal-small">
+                      {filterMode === "task"
+                        ? `仅显示任务 ${shortId(currentTask?.task_uid || "")} 的草稿`
+                        : filterMode === "session"
+                          ? "仅显示当前会话草稿"
+                          : "显示全部草稿"}
+                    </Typography.Text>
                   <List
                     loading={draftsQuery.isLoading}
                     dataSource={drafts}
@@ -1012,7 +1164,13 @@ function ArtifactDraftsPanel({
                         }}
                       >
                         <div className="artifact-title-picker">
-                          <Typography.Text strong ellipsis title={item.title}>{item.title}</Typography.Text>
+                          <div className="artifact-draft-title-block">
+                            <Typography.Text strong ellipsis title={item.title}>{item.title}</Typography.Text>
+                            <Space size={4} wrap>
+                              {item.task_uid ? <Tag>任务 {shortId(item.task_uid)}</Tag> : null}
+                              <Tag>{documentLabel(item.document_type)}</Tag>
+                            </Space>
+                          </div>
                           <Space size={4} wrap={false}>
                             <Tag>v{item.current_revision}</Tag>
                             {item.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
@@ -1022,6 +1180,7 @@ function ArtifactDraftsPanel({
                       </List.Item>
                     )}
                   />
+                  </Space>
                 </div>
                 <div className="artifact-preview">
                   {!draftDetail ? (
@@ -1866,6 +2025,87 @@ function SkillsPanel() {
   );
 }
 
+function DevTasksPanel({
+  selectedSessionUid,
+  currentTaskUid,
+  onOpenDrafts
+}: {
+  selectedSessionUid?: string;
+  currentTaskUid?: string;
+  onOpenDrafts: (draftUid?: string) => void;
+}) {
+  const [scope, setScope] = useState<"session" | "all">(selectedSessionUid ? "session" : "all");
+  const sessionUid = scope === "session" ? selectedSessionUid || "" : "";
+  const tasksQuery = useQuery({
+    queryKey: ["personal-dev-tasks-panel", scope, sessionUid],
+    queryFn: () => personalAgentApi.devTaskList(sessionUid || undefined),
+    retry: false,
+    refetchInterval: 10000
+  });
+  const tasks = tasksQuery.data ?? [];
+
+  useEffect(() => {
+    if (!selectedSessionUid && scope === "session") setScope("all");
+  }, [scope, selectedSessionUid]);
+
+  return (
+    <Space direction="vertical" size={12} className="full-width">
+      <Space wrap>
+        <Select
+          value={scope}
+          onChange={setScope}
+          options={[
+            { value: "session", label: "当前 session", disabled: !selectedSessionUid },
+            { value: "all", label: "全部任务" },
+          ]}
+        />
+        <Typography.Text type="secondary" className="personal-small">
+          {scope === "session" ? "只看当前会话的开发任务" : "显示所有会话的开发任务"}
+        </Typography.Text>
+      </Space>
+      <List
+        loading={tasksQuery.isLoading}
+        dataSource={tasks}
+        locale={{ emptyText: "当前还没有开发任务。发送开发任务类需求后，这里会出现 task 状态和阶段进度。" }}
+        renderItem={(task) => {
+          const focusStage = task.stages.find((stage) => stage.document_type === task.current_step) ?? task.stages.find((stage) => stage.effective_status !== "done");
+          const doneCount = task.stages.filter((stage) => stage.effective_status === "done").length;
+          return (
+            <List.Item className={`dev-task-list-item ${task.task_uid === currentTaskUid ? "active" : ""}`}>
+              <Space direction="vertical" size={8} className="full-width">
+                <Space wrap>
+                  <Typography.Text strong>{task.title}</Typography.Text>
+                  <Tag color={task.status === "blocked" ? "volcano" : task.status === "completed" ? "green" : task.status === "archived" ? "default" : "blue"}>
+                    {task.status}
+                  </Tag>
+                  <Tag>{shortId(task.task_uid)}</Tag>
+                  <Tag>{doneCount}/{task.stages.length}</Tag>
+                </Space>
+                <Typography.Text type="secondary" className="personal-small">
+                  {focusStage ? `当前/下一阶段：${documentLabel(focusStage.document_type)} · ${focusStage.effective_status}` : "阶段已完成"}
+                </Typography.Text>
+                {task.blocked_reason ? <Typography.Text type="danger" className="personal-small">阻塞：{task.blocked_reason}</Typography.Text> : null}
+                <Space wrap>
+                  {task.stages.map((stage) => (
+                    <Tag
+                      key={`${task.task_uid}-${stage.document_type}`}
+                      color={stage.effective_status === "done" ? "green" : stage.effective_status === "needs_revision" ? "volcano" : "default"}
+                      className={stage.draft_uid ? "clickable-tag" : ""}
+                      onClick={() => stage.draft_uid && onOpenDrafts(stage.draft_uid)}
+                    >
+                      {documentLabel(stage.document_type)}:{stage.effective_status}
+                    </Tag>
+                  ))}
+                </Space>
+              </Space>
+            </List.Item>
+          );
+        }}
+      />
+    </Space>
+  );
+}
+
 function CodebasePanel({
   config,
   onConfigChanged
@@ -2145,6 +2385,10 @@ function LlmConfigPanel({
       </Space>
       {runtime?.error ? <Alert type="warning" showIcon message={runtime.error} /> : null}
       <Select
+        className="full-width"
+        popupClassName="llm-select-popup"
+        style={{ width: "100%" }}
+        popupMatchSelectWidth={false}
         value={provider}
         options={options.map((item) => ({ value: item.value, label: item.label }))}
         onChange={(value) => {
@@ -2155,6 +2399,7 @@ function LlmConfigPanel({
       />
       <AutoComplete
         className="full-width"
+        popupClassName="llm-select-popup"
         style={{ width: "100%" }}
         value={model}
         options={modelOptions}
@@ -2217,6 +2462,28 @@ function buildLineDiff(before: string, after: string) {
 
 function showMutationError(error: unknown) {
   message.error(error instanceof Error ? error.message : String(error));
+}
+
+function pickCurrentTask(tasks: PersonalDevTask[]): PersonalDevTask | undefined {
+  return tasks.find((task) => task.status === "active")
+    ?? tasks.find((task) => task.status === "blocked")
+    ?? tasks.find((task) => task.status === "completed")
+    ?? tasks[0];
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function omitKey<T>(items: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in items)) return items;
+  const { [key]: _removed, ...rest } = items;
+  return rest;
+}
+
+function omitKeys<T>(items: Record<string, T>, keys: string[]): Record<string, T> {
+  const remove = new Set(keys);
+  return Object.fromEntries(Object.entries(items).filter(([key]) => !remove.has(key)));
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

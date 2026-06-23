@@ -215,6 +215,95 @@
   margin-top: 8px;
 }
 
+.current-task-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  border: 1px solid #d7e3ef;
+  border-radius: 10px;
+  background: #fcfeff;
+}
+
+.current-task-bar.is-blocked {
+  border-color: #ffd6bf;
+  background: #fffaf7;
+}
+
+.current-task-main,
+.current-task-side {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.current-task-side {
+  align-items: flex-end;
+}
+
+.current-task-stage-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.current-task-stage-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #d7e3ef;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  color: #334155;
+}
+
+.current-task-stage-tag.clickable {
+  cursor: pointer;
+}
+
+.current-task-stage-tag.is-done {
+  border-color: #b7ebc6;
+  background: #f6ffed;
+}
+
+.current-task-stage-tag.is-pending {
+  border-color: #d7e3ef;
+  background: #f8fafc;
+}
+
+.current-task-stage-tag.is-needs_revision {
+  border-color: #ffd8bf;
+  background: #fff7e6;
+  color: #ad4e00;
+}
+
+.bubble-draft-actions {
+  margin-top: 8px;
+}
+
+.message-diagnostics {
+  margin-top: 8px;
+}
+
+.message-diagnostics-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.message-diagnostic-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
 .message-attachment-card {
   min-width: 128px;
   max-width: 220px;
@@ -341,6 +430,15 @@
   width: 100%;
 }
 
+.llm-select-popup {
+  min-width: 220px;
+}
+
+.llm-select-popup .ant-select-item-option-content {
+  overflow: visible;
+  text-overflow: clip;
+}
+
 .codebase-panel {
   min-height: 100%;
 }
@@ -411,6 +509,22 @@
   border-color: #bcdcff;
 }
 
+.dev-task-list-item {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 10px 12px !important;
+  margin-bottom: 8px;
+}
+
+.dev-task-list-item.active {
+  background: #f1f7ff;
+  border-color: #bcdcff;
+}
+
+.clickable-tag {
+  cursor: pointer;
+}
+
 .source-item-content {
   min-width: 0;
 }
@@ -442,6 +556,13 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
+}
+
+.artifact-draft-title-block {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .source-preview-text {

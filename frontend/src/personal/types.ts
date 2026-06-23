@@ -84,6 +84,57 @@ export type PersonalChatTurnInput = {
   source_uids?: string[];
 };
 
+export type PersonalDevTaskStageStatus = "done" | "pending" | "needs_revision";
+
+export type PersonalDevTaskStage = {
+  index: number;
+  document_type: string;
+  effective_status: PersonalDevTaskStageStatus;
+  draft_uid: string;
+  draft_status?: string;
+  lineage_stale?: boolean;
+};
+
+export type PersonalDevTaskNextAction = {
+  action: string;
+  stage: string;
+  reason: string;
+};
+
+export type PersonalDevTaskValidationSummary = {
+  kind: string;
+  command_kind: string;
+  status: string;
+  category: "passed" | "code_logic" | "test_expectation" | "timeout" | "config" | "unknown";
+  returncode?: number | null;
+  timeout?: boolean;
+  configured?: boolean;
+  invocation_uid?: string;
+  recorded_at?: string;
+};
+
+export type PersonalDevTask = {
+  id?: number;
+  task_uid: string;
+  project_id?: number;
+  session_uid: string;
+  title: string;
+  task_type: string;
+  status: string;
+  user_prompt: string;
+  current_step?: string;
+  error_message?: string;
+  created_at?: string;
+  updated_at?: string;
+  completed_at?: string;
+  plan?: Record<string, unknown>;
+  stages: PersonalDevTaskStage[];
+  next_action: PersonalDevTaskNextAction;
+  blocked_reason?: string;
+  last_action?: Record<string, unknown>;
+  validation_summary?: Record<string, PersonalDevTaskValidationSummary>;
+};
+
 export type PersonalChatTurnResult = {
   session: PersonalSession;
   message?: PersonalMessage;
@@ -167,6 +218,7 @@ export type PersonalArtifactDraft = {
   project_id?: number;
   source_uid?: string;
   session_uid?: string;
+  task_uid?: string;
   document_type: string;
   title: string;
   content_format: string;
@@ -253,6 +305,7 @@ export type PersonalSkillUpdateCandidate = {
 export type PersonalArtifactDraftCreateInput = {
   document_type: string;
   session_uid?: string;
+  task_uid?: string;
   title: string;
   content: string;
   content_format?: string;
@@ -271,6 +324,7 @@ export type PersonalArtifactDraftReviseInput = {
 export type PersonalArtifactProposeInput = {
   prompt: string;
   session_uid?: string;
+  task_uid?: string;
   document_type?: string;
   source_uids?: string[];
   make_active?: boolean;
@@ -285,6 +339,7 @@ export type PersonalArtifactNaturalReviseInput = {
 export type PersonalArtifactCodePatchInput = {
   prompt: string;
   session_uid?: string;
+  task_uid?: string;
   target_symbol?: string;
   target_file?: string;
   directives?: PatchDirectiveInput[];
@@ -294,6 +349,7 @@ export type PersonalArtifactCodePatchInput = {
 export type PersonalArtifactUnitTestCodeInput = {
   prompt: string;
   session_uid?: string;
+  task_uid?: string;
   source_uids?: string[];
   make_active?: boolean;
 };
@@ -437,6 +493,8 @@ export type ValidationRunInput = {
   command?: string;
   timeout_s?: number;
   confirmed?: boolean;
+  task_uid?: string;
+  session_uid?: string;
 };
 
 export type PersonalKnowledgeItem = {

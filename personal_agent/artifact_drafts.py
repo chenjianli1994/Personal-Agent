@@ -116,13 +116,22 @@ def create_artifact_draft(
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
 
 
-def list_artifact_drafts(db_path: Path, *, project_id: int, session_uid: str | None = None) -> list[dict[str, Any]]:
+def list_artifact_drafts(
+    db_path: Path,
+    *,
+    project_id: int,
+    session_uid: str | None = None,
+    task_uid: str | None = None,
+) -> list[dict[str, Any]]:
     with connect(db_path) as conn:
         where = ["d.project_id=?", "d.status IN ('active', 'quality_failed')"]
         params: list[Any] = [project_id]
         if session_uid is not None:
             where.append("d.session_uid=?")
             params.append(session_uid)
+        if task_uid is not None:
+            where.append("d.task_uid=?")
+            params.append(task_uid)
         rows = conn.execute(
             """
             SELECT d.*,

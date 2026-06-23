@@ -45,6 +45,7 @@ import type {
   PersonalSkillVersion,
   PersonalSourceTextInput,
   PersonalContext,
+  PersonalDevTask,
   PersonalToolResult,
   SymbolLookupInput,
   TypeUsageInput,
@@ -85,7 +86,8 @@ export const personalAgentApi = {
     apiPost<PersonalLearningReviewInput, PersonalSkillUpdateCandidate>(`/api/personal/skills/update-candidates/${candidateId}/approve`, body),
   rejectSkillUpdateCandidate: (candidateId: number, body: PersonalLearningReviewInput) =>
     apiPost<PersonalLearningReviewInput, PersonalSkillUpdateCandidate>(`/api/personal/skills/update-candidates/${candidateId}/reject`, body),
-  draftList: (sessionUid?: string) => apiGet<PersonalArtifactDraft[]>(params("/api/personal/drafts", { session_uid: sessionUid })),
+  draftList: (sessionUid?: string, taskUid?: string) =>
+    apiGet<PersonalArtifactDraft[]>(params("/api/personal/drafts", { session_uid: sessionUid, task_uid: taskUid })),
   draftDetail: (draftUid: string) => apiGet<PersonalArtifactDraft>(`/api/personal/drafts/${encodeURIComponent(draftUid)}`),
   draftContent: (draftUid: string, revisionIndex?: number) =>
     apiGet<PersonalArtifactContent>(params(`/api/personal/drafts/${encodeURIComponent(draftUid)}/content`, { revision_index: revisionIndex })),
@@ -117,7 +119,13 @@ export const personalAgentApi = {
   renameSession: (sessionUid: string, body: PersonalSessionRenameInput) =>
     apiPut<PersonalSessionRenameInput, PersonalSession>(`/api/personal/sessions/${encodeURIComponent(sessionUid)}/title`, body),
   deleteSession: (sessionUid: string) => apiDelete<{ status: string; session_uid: string }>(`/api/personal/sessions/${encodeURIComponent(sessionUid)}`),
-  chatTurn: (body: PersonalChatTurnInput) => apiPost<PersonalChatTurnInput, PersonalChatTurnResult>("/api/personal/chat/turn", body),
+  chatTurn: (body: PersonalChatTurnInput, init?: { signal?: AbortSignal }) =>
+    apiPost<PersonalChatTurnInput, PersonalChatTurnResult>("/api/personal/chat/turn", body, init),
+  devTaskList: (sessionUid?: string, status?: string) =>
+    apiGet<PersonalDevTask[]>(params("/api/personal/dev-tasks", { session_uid: sessionUid, status })),
+  devTaskGet: (taskUid: string) => apiGet<PersonalDevTask>(`/api/personal/dev-tasks/${encodeURIComponent(taskUid)}`),
+  devTaskContinue: (taskUid: string) =>
+    apiPost<{ task_uid: string }, PersonalDevTask>("/api/personal/dev-tasks/continue", { task_uid: taskUid }),
   codebaseConfig: () => apiGet<PersonalCodebaseConfig>("/api/personal/codebase/config"),
   saveCodebaseConfig: (body: PersonalCodebaseConfigInput) => apiPut<PersonalCodebaseConfigInput, PersonalCodebaseConfig>("/api/personal/codebase/config", body),
   codebaseIndex: (body: CodebaseIndexInput) => apiPost<CodebaseIndexInput, PersonalToolResult>("/api/personal/codebase/index", body),

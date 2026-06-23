@@ -41,12 +41,13 @@ export async function apiText(path: string): Promise<string> {
   return response.text();
 }
 
-export async function apiPost<TReq, TRes>(path: string, body?: TReq): Promise<TRes> {
+export async function apiPost<TReq, TRes>(path: string, body?: TReq, init?: { signal?: AbortSignal }): Promise<TRes> {
   const response = await fetch(path, {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body)
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: init?.signal
   });
   return parseResponse<TRes>(response);
 }

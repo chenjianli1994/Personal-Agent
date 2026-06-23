@@ -483,9 +483,14 @@ def register_personal_agent_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/personal/drafts")
-    def personal_artifact_drafts(session_uid: str | None = None) -> list[dict[str, Any]]:
+    def personal_artifact_drafts(session_uid: str | None = None, task_uid: str | None = None) -> list[dict[str, Any]]:
         _require_capability(context, "artifact_drafts")
-        return list_artifact_drafts(context.db_path, project_id=context.project_id, session_uid=session_uid)
+        return list_artifact_drafts(
+            context.db_path,
+            project_id=context.project_id,
+            session_uid=session_uid,
+            task_uid=task_uid,
+        )
 
     @app.post("/api/personal/documents/propose")
     def personal_artifact_propose(req: PersonalArtifactProposeRequest) -> dict[str, Any]:

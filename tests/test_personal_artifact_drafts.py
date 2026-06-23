@@ -250,6 +250,69 @@ def test_draft_list_session_filter_excludes_other_sessions(tmp_path: Path, monke
     assert [item["draft_uid"] for item in scoped.json()] == [draft_a["draft_uid"]]
 
 
+def test_draft_list_task_filter_only_returns_matching_task(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+
+    session_uid = client.post("/api/personal/chat/turn", json={"content": "任务过滤会话"}).json()["session"]["session_uid"]
+    kept = client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "functional_spec",
+            "session_uid": session_uid,
+            "task_uid": "task_keep",
+            "title": "Keep",
+            "content": "# Keep",
+        },
+    ).json()
+    client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "requirement_breakdown",
+            "session_uid": session_uid,
+            "task_uid": "task_other",
+            "title": "Other",
+            "content": "# Other",
+        },
+    )
+
+    scoped = client.get("/api/personal/drafts", params={"task_uid": "task_keep"})
+    assert scoped.status_code == 200
+    assert [item["draft_uid"] for item in scoped.json()] == [kept["draft_uid"]]
+
+
+def test_draft_list_session_and_task_filters_take_intersection(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+
+    session_a = client.post("/api/personal/chat/turn", json={"content": "交集会话A"}).json()["session"]["session_uid"]
+    session_b = client.post("/api/personal/chat/turn", json={"content": "交集会话B"}).json()["session"]["session_uid"]
+    kept = client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "functional_spec",
+            "session_uid": session_a,
+            "task_uid": "task_shared",
+            "title": "A",
+            "content": "# A",
+        },
+    ).json()
+    client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "functional_spec",
+            "session_uid": session_b,
+            "task_uid": "task_shared",
+            "title": "B",
+            "content": "# B",
+        },
+    )
+
+    scoped = client.get("/api/personal/drafts", params={"session_uid": session_a, "task_uid": "task_shared"})
+    assert scoped.status_code == 200
+    assert [item["draft_uid"] for item in scoped.json()] == [kept["draft_uid"]]
+
+
 def _client(tmp_path: Path) -> TestClient:
     db_path = tmp_path / "agent.db"
     workspace = tmp_path / "workspace"

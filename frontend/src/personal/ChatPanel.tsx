@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Input, Space, Tag, Tooltip, Typography } from "antd";
+import { Alert, Button, Collapse, Empty, Input, Space, Tag, Tooltip, Typography } from "antd";
 import {
   ApiOutlined,
   BookOutlined,
@@ -7,15 +7,25 @@ import {
   FileDoneOutlined,
   FileProtectOutlined,
   FileTextOutlined,
+  HistoryOutlined,
+  PlayCircleOutlined,
   ReloadOutlined,
   RobotOutlined,
   SendOutlined,
+  StopOutlined,
   UploadOutlined,
   UserOutlined
 } from "@ant-design/icons";
 import type { DragEvent, KeyboardEvent } from "react";
 import { useEffect, useRef, useState } from "react";
-import type { AgentLlmStatus, PersonalMessage, PersonalRecallProvenance, PersonalSession } from "./types";
+import type {
+  AgentLlmStatus,
+  PersonalDevTask,
+  PersonalDevTaskStage,
+  PersonalMessage,
+  PersonalRecallProvenance,
+  PersonalSession
+} from "./types";
 
 export type LocalMessage = PersonalMessage & { pending?: boolean };
 
@@ -53,12 +63,17 @@ export function ChatPanel({
   onSend,
   onRetry,
   sending,
+  sendDisabled,
+  onCancelSend,
   localError,
   llmStatus,
+  currentTask,
   onOpenLlmSettings,
   onOpenSources,
   onOpenDrafts,
   onOpenDraftFile,
+  onOpenTasks,
+  onContinueTask,
   onOpenKnowledge,
   onOpenLearning,
   onOpenCodebase,
@@ -78,12 +93,17 @@ export function ChatPanel({
   onSend: () => void;
   onRetry?: () => void;
   sending: boolean;
+  sendDisabled?: boolean;
+  onCancelSend?: () => void;
   localError: string;
   llmStatus?: AgentLlmStatus;
+  currentTask?: PersonalDevTask;
   onOpenLlmSettings: () => void;
   onOpenSources: () => void;
   onOpenDrafts: (draftUid?: string) => void;
   onOpenDraftFile: (draftUid: string) => void;
+  onOpenTasks: () => void;
+  onContinueTask: () => void;
   onOpenKnowledge: () => void;
   onOpenLearning: () => void;
   onOpenCodebase: () => void;
@@ -96,14 +116,14 @@ export function ChatPanel({
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages.length, session?.session_uid]);
+  }, [messages.length, session?.session_uid, currentTask?.task_uid, currentTask?.updated_at]);
 
   const handleDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setDraggingFiles(false);
-    const files = Array.from(event.dataTransfer.files || []);
-    onAddAttachments(files);
+    onAddAttachments(Array.from(event.dataTransfer.files || []));
   };
+
   const handleDragOver = (event: DragEvent<HTMLElement>) => {
     if (event.dataTransfer.types.includes("Files")) {
       event.preventDefault();
@@ -134,6 +154,9 @@ export function ChatPanel({
           <Tooltip title="当前草稿">
             <Button shape="circle" icon={<FileDoneOutlined />} onClick={() => onOpenDrafts()} />
           </Tooltip>
+          <Tooltip title="任务">
+            <Button shape="circle" icon={<HistoryOutlined />} onClick={onOpenTasks} />
+          </Tooltip>
           <Tooltip title="知识库">
             <Button shape="circle" icon={<BookOutlined />} onClick={onOpenKnowledge} />
           </Tooltip>
@@ -152,13 +175,15 @@ export function ChatPanel({
         </Space>
       </header>
       <div className="personal-chat-messages" ref={scrollRef}>
+        {currentTask ? <CurrentTaskBar task={currentTask} onOpenDrafts={onOpenDrafts} onContinueTask={onContinueTask} /> : null}
         {!messages.length ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="输入问题或任务，Agent 会给出回答。" />
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="输入问题或任务，Agent 会给出回应。" />
         ) : (
           messages.map((item, index) => (
             <Bubble
               key={`${item.role}-${item.created_at || index}-${index}`}
               item={item}
+              onOpenDrafts={onOpenDrafts}
               onOpenDraftFile={onOpenDraftFile}
             />
           ))
@@ -189,7 +214,7 @@ export function ChatPanel({
                   className="composer-attachment-tag"
                 >
                   <FileTextOutlined /> {item.file.name}
-                  {item.status === "uploading" ? " 上传中" : item.status === "uploaded" ? " 已解析" : item.status === "error" ? ` 失败：${item.error || ""}` : " 待发送"}
+                  {item.status === "uploading" ? " 上传中" : item.status === "uploaded" ? " 已解析" : item.status === "error" ? ` 失败: ${item.error || ""}` : " 待发送"}
                 </Tag>
               ))}
             </div>
@@ -217,12 +242,8 @@ export function ChatPanel({
                 if (event.key === "ArrowUp" || event.key === "ArrowDown") {
                   const caretAtStart = event.currentTarget.selectionStart === 0 && event.currentTarget.selectionEnd === 0;
                   const caretAtEnd = event.currentTarget.selectionStart === draft.length && event.currentTarget.selectionEnd === draft.length;
-                  if (!caretAtStart && !caretAtEnd && draft.trim()) {
-                    return;
-                  }
-                  if (!inputHistory.length) {
-                    return;
-                  }
+                  if (!caretAtStart && !caretAtEnd && draft.trim()) return;
+                  if (!inputHistory.length) return;
                   event.preventDefault();
                   const nextIndex = resolveHistoryIndex({
                     key: event.key,
@@ -250,14 +271,15 @@ export function ChatPanel({
             event.target.value = "";
           }}
         />
-        <Tooltip title="发送">
+        <Tooltip title={sending ? "停止本次回复" : sendDisabled ? "其他会话正在回复" : "发送"}>
           <Button
             type="primary"
+            danger={sending}
             shape="circle"
-            icon={<SendOutlined />}
-            loading={sending || attachmentsUploading}
-            disabled={sending || attachmentsUploading || (!draft.trim() && !attachments.length)}
-            onClick={onSend}
+            icon={sending ? <StopOutlined /> : <SendOutlined />}
+            loading={attachmentsUploading}
+            disabled={attachmentsUploading || sendDisabled || (!sending && !draft.trim() && !attachments.length)}
+            onClick={sending ? onCancelSend : onSend}
           />
         </Tooltip>
       </footer>
@@ -290,7 +312,92 @@ function LlmBadge({ status }: { status?: AgentLlmStatus }) {
   return <Tag color={isReal ? "green" : "red"}>{text}</Tag>;
 }
 
-function Bubble({ item, onOpenDraftFile }: { item: LocalMessage; onOpenDraftFile: (draftUid: string) => void }) {
+function CurrentTaskBar({
+  task,
+  onOpenDrafts,
+  onContinueTask
+}: {
+  task: PersonalDevTask;
+  onOpenDrafts: (draftUid?: string) => void;
+  onContinueTask: () => void;
+}) {
+  const lastAction = asRecord(task.last_action);
+  const focusStage = task.stages.find((stage) => stage.document_type === task.current_step) ?? task.stages.find((stage) => stage.effective_status !== "done");
+  const validationEntries = Object.values(task.validation_summary ?? {});
+  return (
+    <div className={`current-task-bar ${task.status === "blocked" ? "is-blocked" : ""}`}>
+      <div className="current-task-main">
+        <Space wrap>
+          <Typography.Text strong>{task.title}</Typography.Text>
+          <Tag color={task.status === "blocked" ? "volcano" : task.status === "completed" ? "green" : "blue"}>{task.status}</Tag>
+          <Tag>{shortTaskId(task.task_uid)}</Tag>
+          {focusStage?.draft_uid ? (
+            <Button type="link" size="small" className="current-task-stage-link" onClick={() => onOpenDrafts(focusStage.draft_uid)}>
+              {documentLabel(focusStage.document_type)}
+            </Button>
+          ) : null}
+          {task.next_action?.stage ? <Tag>下一步：{documentLabel(task.next_action.stage)}</Tag> : null}
+        </Space>
+        <div className="current-task-stage-list">
+          {task.stages.map((stage) => (
+            <TaskStageTag key={`${task.task_uid}-${stage.document_type}`} stage={stage} onOpenDrafts={onOpenDrafts} />
+          ))}
+        </div>
+      </div>
+      <div className="current-task-side">
+        {task.blocked_reason ? <Typography.Text type="danger">阻塞：{task.blocked_reason}</Typography.Text> : null}
+        {lastAction.type || lastAction.status ? (
+          <Typography.Text type="secondary" className="personal-small">
+            最近动作：{String(lastAction.type || "unknown")} / {String(lastAction.status || task.status)}
+          </Typography.Text>
+        ) : null}
+        {validationEntries.length ? (
+          <Space wrap className="current-task-validation">
+            {validationEntries.map((entry) => (
+              <Tag key={`${entry.kind}-${entry.invocation_uid || entry.recorded_at || entry.category}`} color={validationTagColor(entry.category)}>
+                {entry.kind}:{entry.category}
+              </Tag>
+            ))}
+          </Space>
+        ) : null}
+        <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={onContinueTask} disabled={task.status === "completed"}>
+          继续推进
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function TaskStageTag({
+  stage,
+  onOpenDrafts
+}: {
+  stage: PersonalDevTaskStage;
+  onOpenDrafts: (draftUid?: string) => void;
+}) {
+  const clickable = Boolean(stage.draft_uid);
+  return (
+    <button
+      type="button"
+      className={`current-task-stage-tag is-${stage.effective_status}${clickable ? " clickable" : ""}`}
+      disabled={!clickable}
+      onClick={() => clickable && onOpenDrafts(stage.draft_uid)}
+    >
+      <span>{documentLabel(stage.document_type)}</span>
+      <span>{stage.effective_status}</span>
+    </button>
+  );
+}
+
+function Bubble({
+  item,
+  onOpenDrafts,
+  onOpenDraftFile
+}: {
+  item: LocalMessage;
+  onOpenDrafts: (draftUid?: string) => void;
+  onOpenDraftFile: (draftUid: string) => void;
+}) {
   const isUser = item.role === "user";
   const draft = asRecord(item.metadata?.draft);
   const draftUid = typeof draft.draft_uid === "string" ? draft.draft_uid : "";
@@ -299,8 +406,10 @@ function Bubble({ item, onOpenDraftFile }: { item: LocalMessage; onOpenDraftFile
   const devTaskStatus = typeof devTask.status === "string" ? devTask.status : "";
   const devTaskNextAction = asRecord(devTask.next_action);
   const devTaskStage = typeof devTaskNextAction.stage === "string" ? devTaskNextAction.stage : "";
+  const diagnostics = collectMessageDiagnostics(item.metadata);
   const attachments = messageAttachments(item.metadata?.attachments);
   const provenance = recallProvenance(item.metadata?.recall_provenance);
+
   return (
     <div className={`personal-bubble-row ${isUser ? "user" : "assistant"}`}>
       <div className="personal-avatar">{isUser ? <UserOutlined /> : <RobotOutlined />}</div>
@@ -340,19 +449,59 @@ function Bubble({ item, onOpenDraftFile }: { item: LocalMessage; onOpenDraftFile
               <div>
                 <Typography.Text strong>开发任务 {devTaskStatus || "active"}</Typography.Text>
                 <Typography.Text type="secondary" className="personal-small">
-                  {devTaskStage ? `下一步：${devTaskStage}` : "任务已记录到 agent_tasks"}
+                  {devTaskStage ? `下一步：${documentLabel(devTaskStage)}` : "任务已记录到 agent_tasks"}
                 </Typography.Text>
               </div>
             </div>
           </div>
         ) : null}
         {!isUser && draftUid ? (
-          <Button size="small" icon={<FileDoneOutlined />} className="bubble-draft-link" onClick={() => onOpenDraftFile(draftUid)}>
-            打开草稿
-          </Button>
+          <Space wrap className="bubble-draft-actions">
+            <Button size="small" icon={<FileDoneOutlined />} className="bubble-draft-link" onClick={() => onOpenDraftFile(draftUid)}>
+              打开草稿
+            </Button>
+            <Button size="small" onClick={() => onOpenDrafts(draftUid)}>
+              在草稿箱查看
+            </Button>
+          </Space>
         ) : null}
+        {!isUser && diagnostics.length ? <MessageDiagnostics diagnostics={diagnostics} /> : null}
       </div>
     </div>
+  );
+}
+
+function MessageDiagnostics({
+  diagnostics
+}: {
+  diagnostics: Array<{ key: string; title: string; lines: string[] }>;
+}) {
+  return (
+    <Collapse
+      size="small"
+      ghost
+      className="message-diagnostics"
+      items={[
+        {
+          key: "diagnostics",
+          label: "诊断",
+          children: (
+            <div className="message-diagnostics-body">
+              {diagnostics.map((item) => (
+                <div key={item.key} className="message-diagnostic-item">
+                  <Typography.Text strong>{item.title}</Typography.Text>
+                  {item.lines.map((line, index) => (
+                    <Typography.Text key={`${item.key}-${index}`} type="secondary" className="personal-small">
+                      {line}
+                    </Typography.Text>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )
+        }
+      ]}
+    />
   );
 }
 
@@ -383,8 +532,97 @@ function recallProvenance(value: unknown): PersonalRecallProvenance[] {
 function displayMessageContent(content: string, isUser: boolean) {
   if (isUser) return content;
   return content
-    .replace(/[，,]\s*draft_uid=[A-Za-z0-9_-]+(?=[。.,，\s]|$)/g, "")
-    .replace(/\s+([。.,，])/g, "$1");
+    .replace(/[，,]?\s*draft_uid=[A-Za-z0-9_-]+(?=[。,.]|$)/g, "")
+    .replace(/\s+([。,.])/g, "$1");
+}
+
+function collectMessageDiagnostics(metadata: Record<string, unknown> | undefined): Array<{ key: string; title: string; lines: string[] }> {
+  const result: Array<{ key: string; title: string; lines: string[] }> = [];
+  if (!metadata) return result;
+  const devTask = asRecord(metadata.dev_task);
+  const lastAction = asRecord(devTask.last_action);
+  const policy = asRecord(lastAction.policy);
+  const innerPolicy = asRecord(policy.policy);
+  const route = asRecord(metadata.intent_route);
+  const routeLlm = asRecord(route.llm);
+  const validationSummary = asRecord(devTask.validation_summary);
+  const toolResult = asRecord(metadata.tool_result);
+
+  if (Object.keys(policy).length || Object.keys(innerPolicy).length) {
+    const lines = compactLines([
+      boolLine("policy", innerPolicy.allowed),
+      textLine("reason", innerPolicy.reason || policy.reason),
+    ]);
+    if (lines.length) result.push({ key: "policy", title: "策略", lines });
+  }
+  if (metadata.fallback || String(route.router_source || "") === "fallback" || String(routeLlm.status || "").toLowerCase() === "failed") {
+    const lines = compactLines([
+      textLine("provider", routeLlm.provider),
+      textLine("model", routeLlm.model),
+      textLine("call_id", routeLlm.call_id),
+      textLine("error", routeLlm.error),
+    ]);
+    if (lines.length) result.push({ key: "llm-fallback", title: "LLM fallback", lines });
+  }
+  if (Object.keys(validationSummary).length) {
+    const lines = Object.values(validationSummary).flatMap((value) => {
+      const entry = asRecord(value);
+      return compactLines([
+        `${String(entry.kind || "validation")}: ${String(entry.category || entry.status || "unknown")}`,
+        textLine("command", entry.command_kind),
+        textLine("call_id", entry.invocation_uid),
+      ]);
+    });
+    if (lines.length) result.push({ key: "validation", title: "验证摘要", lines });
+  }
+  if (Object.keys(toolResult).length && (toolResult.error || String(toolResult.status || "") === "failed" || String(toolResult.status || "") === "rejected")) {
+    const lines = compactLines([
+      textLine("tool", toolResult.tool_name || toolResult.tool),
+      textLine("status", toolResult.status),
+      textLine("error", toolResult.error),
+      textLine("call_id", toolResult.invocation_uid),
+    ]);
+    if (lines.length) result.push({ key: "tool", title: "工具错误", lines });
+  }
+  return result;
+}
+
+function compactLines(lines: Array<string | null>): string[] {
+  return lines.filter((line): line is string => Boolean(line && line.trim()));
+}
+
+function textLine(label: string, value: unknown): string | null {
+  const text = typeof value === "string" ? value.trim() : value === undefined || value === null ? "" : String(value);
+  return text ? `${label}: ${text}` : null;
+}
+
+function boolLine(label: string, value: unknown): string | null {
+  return typeof value === "boolean" ? `${label}: ${value ? "allowed" : "blocked"}` : null;
+}
+
+function validationTagColor(category: string): string {
+  if (category === "passed") return "green";
+  if (category === "timeout") return "gold";
+  if (category === "config") return "orange";
+  if (category === "code_logic" || category === "test_expectation") return "volcano";
+  return "default";
+}
+
+function shortTaskId(value: string): string {
+  return value.length > 14 ? value.slice(-8) : value;
+}
+
+function documentLabel(value: string): string {
+  const labels: Record<string, string> = {
+    requirement_analysis_report: "需求分析",
+    requirement_breakdown: "需求拆解",
+    functional_spec: "功能规格",
+    detailed_design: "详细设计",
+    test_case_spec: "测试用例",
+    unit_test_code_or_diff: "单测代码",
+    c_code_diff: "代码补丁",
+  };
+  return labels[value] ?? value;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
