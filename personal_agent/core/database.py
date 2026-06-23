@@ -39,10 +39,15 @@ CREATE TABLE IF NOT EXISTS project_inputs (
 CREATE TABLE IF NOT EXISTS requirements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL,
+    task_uid TEXT NOT NULL DEFAULT '',
+    source_draft_uid TEXT NOT NULL DEFAULT '',
     requirement_id TEXT NOT NULL,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    anchor_fingerprint TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'candidate',
+    deprecated_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(project_id, requirement_id),
@@ -81,9 +86,14 @@ CREATE TABLE IF NOT EXISTS artifact_files (
 CREATE TABLE IF NOT EXISTS trace_links (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL,
+    task_uid TEXT NOT NULL DEFAULT '',
     requirement_id TEXT NOT NULL,
     link_type TEXT NOT NULL,
     target_ref TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    confidence REAL NOT NULL DEFAULT 0,
+    managed_by TEXT NOT NULL DEFAULT '',
     source_agent_run_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     UNIQUE(project_id, requirement_id, link_type, target_ref, source_agent_run_id),
@@ -940,6 +950,28 @@ def _ensure_compat_columns(conn: sqlite3.Connection) -> None:
             "session_uid": "TEXT NOT NULL DEFAULT ''",
         },
     )
+    _add_columns(
+        conn,
+        "requirements",
+        {
+            "task_uid": "TEXT NOT NULL DEFAULT ''",
+            "source_draft_uid": "TEXT NOT NULL DEFAULT ''",
+            "anchor_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            "deprecated_at": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _add_columns(
+        conn,
+        "trace_links",
+        {
+            "task_uid": "TEXT NOT NULL DEFAULT ''",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            "status": "TEXT NOT NULL DEFAULT 'active'",
+            "confidence": "REAL NOT NULL DEFAULT 0",
+            "managed_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
     _backfill_personal_draft_sessions(conn)
     _add_columns(
         conn,
@@ -1033,6 +1065,14 @@ def _ensure_compat_indexes(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_personal_drafts_project_task_type_status "
         "ON personal_drafts(project_id, task_uid, document_type, status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_requirements_project_task_status "
+        "ON requirements(project_id, task_uid, status, deprecated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trace_links_project_task_status "
+        "ON trace_links(project_id, task_uid, status, managed_by)"
     )
 
 

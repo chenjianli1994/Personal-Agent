@@ -240,6 +240,14 @@ class PersonalDevTaskContinueRequest(BaseModel):
     task_uid: str
 
 
+class PersonalDevTaskPatchProposeRequest(BaseModel):
+    prompt: str
+
+
+class PersonalDevTaskPatchRepairRequest(BaseModel):
+    prompt: str
+
+
 class PersonalArtifactExportRequest(BaseModel):
     format: str = ""
     revision_index: int | None = None
@@ -359,6 +367,44 @@ def register_personal_agent_routes(
             return dev_tasks.get(task_uid)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/personal/dev-tasks/{task_uid}/trace")
+    def personal_dev_task_trace(task_uid: str) -> dict[str, Any]:
+        try:
+            return dev_tasks.trace(task_uid)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/personal/dev-tasks/{task_uid}/trace/rebuild")
+    def personal_dev_task_trace_rebuild(task_uid: str) -> dict[str, Any]:
+        try:
+            return dev_tasks.rebuild_trace(task_uid)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/personal/dev-tasks/{task_uid}/code-patch/propose")
+    def personal_dev_task_code_patch_propose(task_uid: str, req: PersonalDevTaskPatchProposeRequest) -> dict[str, Any]:
+        _require_capability(context, "artifact_generation")
+        _require_capability(context, "patch_candidate")
+        try:
+            result = dev_tasks.propose_patch_candidate(task_uid=task_uid, prompt=req.prompt)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if result.get("status") == "blocked":
+            raise HTTPException(status_code=400, detail=result)
+        return result
+
+    @app.post("/api/personal/dev-tasks/{task_uid}/code-patch/repair")
+    def personal_dev_task_code_patch_repair(task_uid: str, req: PersonalDevTaskPatchRepairRequest) -> dict[str, Any]:
+        _require_capability(context, "artifact_generation")
+        _require_capability(context, "patch_candidate")
+        try:
+            result = dev_tasks.propose_repair_candidate(task_uid=task_uid, prompt=req.prompt)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if result.get("status") == "blocked":
+            raise HTTPException(status_code=400, detail=result)
+        return result
 
     @app.get("/api/personal/dev-tasks")
     def personal_dev_task_list(session_uid: str = "", status: str = "") -> list[dict[str, Any]]:

@@ -685,6 +685,57 @@ def test_correction_feedback_only_marks_declared_used_memory_unhelpful(tmp_path:
     assert second_stats["unhelpful_count"] == 1
 
 
+def test_correction_feedback_marks_recalled_solved_failure_memory_unhelpful(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    response = client.post(
+        "/api/personal/learning/feedback",
+        json={"feedback": "当 speed.c VehicleSpeed_Read 的 tests 出现 test_expectation 失败时，优先恢复 SPEED_INVALID_DEFAULT 哨兵值。"},
+    )
+    assert response.status_code == 200, response.json()
+    candidate_id = int(response.json()["id"])
+    approved = client.post(
+        f"/api/personal/learning/candidates/{candidate_id}/approve",
+        json={"reviewer": "tester", "comment": "solved failure memory"},
+    )
+    assert approved.status_code == 200, approved.json()
+    item_uid = f"kb_memory_{candidate_id}"
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_chat_answer":
+            return LLMResult(
+                call_id=708,
+                provider="fake-test",
+                model="memory-chat-fixture",
+                status="ok",
+                parsed={
+                    "answer": "遇到 speed.c 的 test_expectation 失败时，我会恢复 SPEED_INVALID_DEFAULT。",
+                    "used_sources": [],
+                    "memory_item_uids_used": [item_uid],
+                    "limitations": [],
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    first = client.post("/api/personal/chat/turn", json={"content": "speed.c 的 test_expectation 失败一般怎么修？"})
+    assert first.status_code == 200, first.json()
+    session_uid = first.json()["session"]["session_uid"]
+    metadata = first.json()["message"]["metadata"]
+    assert item_uid in metadata["injected_memory_item_uids"]
+    assert metadata["memory_item_uids_used"] == [item_uid]
+
+    correction = client.post(
+        "/api/personal/chat/turn",
+        json={"session_uid": session_uid, "content": "你理解错了，这类失败不一定要恢复 SPEED_INVALID_DEFAULT，先确认 requirement 和当前符号证据。"},
+    )
+    assert correction.status_code == 200, correction.json()
+    stats = _item_stats(db_path, item_uid)
+    assert stats["unhelpful_count"] == 1
+
+
 def test_forbidden_legacy_memory_is_not_injected_or_counted(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     project_id = _project_id(client)

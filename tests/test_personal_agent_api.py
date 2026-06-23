@@ -64,6 +64,18 @@ def test_personal_app_bootstrap_uses_personal_tables(tmp_path: Path, monkeypatch
             "personal_skill_eval_runs",
         ]:
             assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        requirement_columns = {row["name"] for row in conn.execute("PRAGMA table_info(requirements)").fetchall()}
+        trace_columns = {row["name"] for row in conn.execute("PRAGMA table_info(trace_links)").fetchall()}
+        assert {"task_uid", "source_draft_uid", "anchor_fingerprint", "metadata_json", "deprecated_at"} <= requirement_columns
+        assert {"task_uid", "metadata_json", "status", "confidence", "managed_by"} <= trace_columns
+
+
+def test_dev_task_patch_propose_route_is_registered(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    app = create_personal_app(tmp_path / "agent.db", tmp_path / "workspace")
+    paths = {(route.path, tuple(sorted(route.methods or []))) for route in app.routes}
+    assert ("/api/personal/dev-tasks/{task_uid}/code-patch/propose", ("POST",)) in paths
+    assert ("/api/personal/dev-tasks/{task_uid}/code-patch/repair", ("POST",)) in paths
 
 
 def test_bootstrap_fresh_workspace_does_not_require_knowledge_directory(tmp_path: Path, monkeypatch) -> None:
