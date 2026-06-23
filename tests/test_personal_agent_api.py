@@ -11,7 +11,6 @@ from personal_agent.bootstrap import bootstrap_personal_agent
 from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS, RETIRED_PROJECT_INPUT_KEYS
 from personal_agent.core.database import connect
 from personal_agent.app import create_personal_app
-from personal_agent.document_intent import document_type_from_text, looks_like_document_generation
 
 
 LLMResult = getattr(llm_gateway_module, "LLMResult")
@@ -319,13 +318,6 @@ def test_personal_document_generation_uses_llm_route_and_skill_generation(tmp_pa
     assert draft_count == 1
 
 
-def test_document_intent_helper_matches_chat_and_unified_turn_document_types() -> None:
-    assert looks_like_document_generation("生成详细设计文档") is True
-    assert document_type_from_text("生成详细设计文档") == "detailed_design"
-    assert document_type_from_text("输出单元测试代码") == "unit_test_code_or_diff"
-    assert looks_like_document_generation("普通问题：详细说明一下") is False
-
-
 def test_chat_and_unified_turn_document_generation_are_equivalent(tmp_path: Path, monkeypatch) -> None:
     client, _db_path, _ = _client(tmp_path, monkeypatch)
     _add_source(client)
@@ -436,6 +428,23 @@ def test_quality_failed_draft_remains_active_for_followup_revision(tmp_path: Pat
     original_complete_json = LLMBridge.complete_json
 
     def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_intent_route" and "你把证据引用这些内容去掉" in user_prompt:
+            return LLMResult(
+                call_id=901,
+                provider="fake-test",
+                model="router-fixture",
+                status="ok",
+                parsed={
+                    "intent": "revise_draft",
+                    "confidence": 0.94,
+                    "requires_active_draft": True,
+                    "revises_draft": True,
+                    "creates_draft": False,
+                    "answer_mode": "general_chat",
+                    "reason": "LLM routed the follow-up as an explicit draft revision.",
+                },
+                raw_text="{}",
+            )
         if purpose == "personal_artifact_generate":
             return LLMResult(
                 call_id=902,
@@ -525,6 +534,59 @@ def test_active_draft_can_be_revised_via_llm_route(tmp_path: Path, monkeypatch) 
     assert message["metadata"]["draft"]["draft_uid"] == draft_uid
     assert message["metadata"]["draft"]["current_revision"] == 2
     assert "draft_uid" not in message["content"]
+
+
+def test_answer_only_route_does_not_revise_active_draft_by_local_keywords(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    session_uid = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()["session"]["session_uid"]
+    draft = client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "requirement_analysis_report",
+            "session_uid": session_uid,
+            "title": "待修订草稿",
+            "content": "# 待修订草稿\n\n原始内容",
+        },
+    ).json()
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_intent_route":
+            return LLMResult(
+                call_id=940,
+                provider="deepseek-test",
+                model="router",
+                status="ok",
+                parsed={
+                    "intent": "answer_only",
+                    "confidence": 0.95,
+                    "answer_mode": "general_chat",
+                    "reason": "LLM chose not to revise the draft.",
+                },
+                raw_text="{}",
+            )
+        if purpose == "personal_chat_answer":
+            return LLMResult(
+                call_id=941,
+                provider="deepseek-test",
+                model="answer",
+                status="ok",
+                parsed={"answer": "这是普通回答，没有修订草稿。", "memory_item_uids_used": []},
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "把刚才草稿这些删掉"})
+
+    assert response.status_code == 200, response.text
+    message = response.json()["message"]
+    assert message["metadata"]["intent_route"]["intent"] == "answer_only"
+    assert "draft" not in message["metadata"]
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT current_revision FROM personal_drafts WHERE draft_uid=?", (draft["draft_uid"],)).fetchone()
+    assert row["current_revision"] == 1
 
 
 def test_llm_route_target_revision_revises_from_requested_base_version(tmp_path: Path, monkeypatch) -> None:
@@ -618,6 +680,50 @@ def test_llm_route_target_revision_revises_from_requested_base_version(tmp_path:
     assert message["metadata"]["draft"]["draft_uid"] == draft_uid
     assert message["metadata"]["draft"]["current_revision"] == 5
     assert "基于《需求分析报告（水泵占空比计算）》v3" in message["content"]
+
+
+def test_unified_turn_answer_only_route_does_not_create_document_by_local_keywords(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    _add_source(client)
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_intent_route":
+            return LLMResult(
+                call_id=950,
+                provider="deepseek-test",
+                model="router",
+                status="ok",
+                parsed={
+                    "intent": "answer_only",
+                    "confidence": 0.94,
+                    "answer_mode": "general_chat",
+                    "reason": "LLM chose answer only.",
+                },
+                raw_text="{}",
+            )
+        if purpose == "personal_chat_answer":
+            return LLMResult(
+                call_id=951,
+                provider="deepseek-test",
+                model="answer",
+                status="ok",
+                parsed={"answer": "只是回答，不生成文档。", "memory_item_uids_used": []},
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post("/api/agent/unified-turn", json={"content": "生成详细设计文档"})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["mode"] == "personal_chat"
+    assert payload["metadata"]["personal_intent"]["intent"] == "answer_only"
+    assert payload["metadata"]["personal_intent"]["created_draft_uids"] == []
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0] == 0
 
 
 def test_active_draft_is_not_reused_across_sessions(tmp_path: Path, monkeypatch) -> None:

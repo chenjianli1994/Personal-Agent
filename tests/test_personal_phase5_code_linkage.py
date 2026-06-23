@@ -209,14 +209,7 @@ def test_personal_phase5_unit_test_code_draft_and_validation_allowlist(tmp_path:
     assert allowed.status_code == 200
     assert allowed.json()["output"]["passed"] is True
 
-    turn = client.post("/api/agent/unified-turn", json={"content": "生成单元测试代码"})
-    assert turn.status_code == 200
-    assert turn.json()["mode"] == "personal_phase4_artifact"
-    metadata = turn.json()["metadata"]["personal_intent"]
-    assert metadata["created_draft_uids"]
-    created = client.get(f"/api/personal/artifacts/{metadata['created_draft_uids'][0]}").json()
-    assert created["artifact_type"] == "unit_test_code_or_diff"
-    assert "test_exception_or_diagnostic_path" in created["content"]
+    assert "test_exception_or_diagnostic_path" in payload["content"]
 
 
 def test_requirement_layer_document_does_not_inject_code_impact(tmp_path: Path, monkeypatch) -> None:

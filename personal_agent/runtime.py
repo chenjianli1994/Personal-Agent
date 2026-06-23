@@ -16,7 +16,6 @@ from .artifact_generation import propose_personal_artifact, revise_personal_arti
 from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .context_builder import PersonalContextBuilder
 from .dev_tasks import DevTaskOrchestrator, is_continue_prompt
-from .document_intent import looks_like_document_generation
 from .intent_router import PersonalIntentRouter
 from .input_documents import activate_input_sources
 from .knowledge_recall import billable_memory_item_uids, record_recall_feedback, safe_recall_prompt_item
@@ -260,10 +259,6 @@ class PersonalRuntime:
         if "置信度过低" in policy_reason:
             return False
         if str(route.get("intent") or "") == "generate_document":
-            return True
-        if looks_like_document_generation(prompt):
-            return True
-        if is_continue_prompt(prompt):
             return True
         return False
 

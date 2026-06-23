@@ -276,37 +276,36 @@ def test_runtime_document_generation_starts_dev_task_and_returns_metadata(tmp_pa
         assert conn.execute("SELECT COUNT(*) FROM personal_drafts WHERE task_uid=?", (task["task_uid"],)).fetchone()[0] == 1
 
 
-def test_runtime_document_generation_without_source_starts_blocked_dev_task(tmp_path: Path, monkeypatch: Any) -> None:
+def test_runtime_document_generation_without_source_falls_back_without_dev_task(tmp_path: Path, monkeypatch: Any) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
 
     response = client.post("/api/personal/chat/turn", json={"content": "生成需求分析报告"})
 
     assert response.status_code == 200, response.text
     message = response.json()["message"]
-    task = message["metadata"]["dev_task"]
     route = message["metadata"]["intent_route"]
-    assert message["metadata"]["context"] == "dev_task_start"
-    assert task["status"] == "blocked"
-    assert task["last_action"]["status"] == "blocked"
-    assert task["next_action"]["stage"] == "requirement_analysis_report"
+    assert "dev_task" not in message["metadata"]
+    assert message["metadata"]["context"] == "general"
+    assert route["intent"] == "answer_only"
     assert route["policy"]["fallback"] is True
-    assert "不能生成文档草稿" in task["blocked_reason"]
     assert "draft" not in message["metadata"]
     with connect(db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM agent_tasks WHERE task_uid=?", (task["task_uid"],)).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0] == 0
 
 
-def test_runtime_continue_word_without_active_task_starts_dev_task(tmp_path: Path, monkeypatch: Any) -> None:
-    client, _db_path, _ = _client(tmp_path, monkeypatch)
+def test_runtime_continue_word_without_active_task_does_not_start_dev_task(tmp_path: Path, monkeypatch: Any) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
     _source(client)
 
     response = client.post("/api/personal/chat/turn", json={"content": "按计划"})
 
     assert response.status_code == 200, response.text
     message = response.json()["message"]
-    assert message["metadata"]["context"] == "dev_task_start"
-    assert message["metadata"]["dev_task"]["last_action"]["status"] == "generated"
+    assert "dev_task" not in message["metadata"]
+    assert message["metadata"]["intent_route"]["intent"] == "answer_only"
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0] == 0
 
 
 def test_validation_summary_classification_uses_kind_returncode_timeout_and_config_only() -> None:

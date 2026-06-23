@@ -30,7 +30,6 @@ from .artifact_generation import (
 )
 from .artifact_export import export_personal_artifact, open_personal_artifact, resolve_personal_artifact_download
 from .bootstrap import PersonalAgentContext
-from .document_intent import document_type_from_text, looks_like_document_generation
 from .dev_tasks import DevTaskOrchestrator
 from .runtime import PersonalRuntime, PersonalRuntimeError
 from .input_documents import (
@@ -378,30 +377,6 @@ def register_personal_agent_routes(
         message_metadata = message.get("metadata") or {}
         learning = message_metadata.get("learning_reflection") or {}
         draft = message_metadata.get("draft") or {}
-        if not draft and looks_like_document_generation(req.content):
-            document_type = document_type_from_text(req.content)
-            fallback_source_uids = req.source_uids or [str(item) for item in (session.get("active_source_uid") and [session.get("active_source_uid")] or [])]
-            if document_type == "unit_test_code_or_diff":
-                draft = propose_personal_unit_test_code(
-                    context.db_path,
-                    project_id=context.project_id,
-                    prompt=req.content,
-                    source_uids=fallback_source_uids,
-                    session_task_uid=session["session_uid"],
-                    make_active=True,
-                )
-            else:
-                draft = propose_personal_artifact(
-                    context.db_path,
-                    workspace=context.workspace,
-                    project_id=context.project_id,
-                    prompt=req.content,
-                    document_type=document_type,
-                    source_uids=fallback_source_uids,
-                    session_task_uid=session["session_uid"],
-                    make_active=True,
-                )
-            draft.setdefault("artifact" + "_type", draft.get("document_type", document_type))
         personal_intent = {
             "intent": (message_metadata.get("intent_route") or {}).get("intent") or "",
             "learning_candidate_id": learning.get("candidate_id") or (message_metadata.get("learning_candidate") or {}).get("id"),

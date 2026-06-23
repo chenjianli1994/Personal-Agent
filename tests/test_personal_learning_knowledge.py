@@ -197,11 +197,11 @@ def test_personal_learning_candidate_immediate_and_approved_memory_flow(tmp_path
     assert "功能规范不要写实现细节" in candidate["lesson"]
 
     immediate = client.post(
-        "/api/agent/unified-turn",
-        json={"task_uid": task_uid, "content": "生成功能规范说明"},
+        "/api/personal/artifacts/propose",
+        json={"session_uid": task_uid, "prompt": "生成功能规范说明", "artifact_type": "functional_spec"},
     )
     assert immediate.status_code == 200
-    draft_uid = immediate.json()["metadata"]["personal_intent"]["created_draft_uids"][0]
+    draft_uid = immediate.json()["draft_uid"]
     draft = client.get(f"/api/personal/artifacts/{draft_uid}").json()
     assert "本会话即时遵守：功能规范不要写实现细节" in draft["content"]
     assert "candidate:" in draft["content"]
