@@ -106,13 +106,36 @@ class PersonalRuntime:
         return {"status": "deleted", "session_uid": session_uid}
 
     def turn(self, *, content: str, session_uid: str = "", source_uids: list[str] | None = None) -> dict[str, Any]:
+        last_event: dict[str, Any] | None = None
+        for event in self.turn_events(content=content, session_uid=session_uid, source_uids=source_uids):
+            last_event = event
+        if not last_event or last_event.get("stage") != "done":
+            raise PersonalRuntimeError("turn did not produce a final payload")
+        return dict(last_event["payload"])
+
+    def turn_events(self, *, content: str, session_uid: str = "", source_uids: list[str] | None = None):
         prompt, source_uids = self._normalize_turn_input(content=content, source_uids=source_uids)
-        session_uid = self._start_turn_session(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
+        session = self._ensure_session(session_uid, prompt)
+        session_uid = session["session_uid"]
+        yield {"stage": "route", "session_uid": session_uid}
+        self._append_turn_user_message(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
         active_task = self.dev_tasks.active_task_for_session(session_uid)
         if active_task and is_continue_prompt(prompt):
+            yield {"stage": "generate", "session_uid": session_uid}
             message = self._continue_dev_task_turn(session_uid=session_uid, task_uid=str(active_task["task_uid"]))
-            return self._finish_turn(session_uid=session_uid, prompt=prompt, message=message)
-        context, route, skill_reflection, reflection = self._prepare_turn_context(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
+            payload = self._finish_turn(session_uid=session_uid, prompt=prompt, message=message)
+            yield {"stage": "done", "session_uid": session_uid, "payload": payload}
+            return
+        context, route, skill_reflection, reflection = self._prepare_turn_context(
+            session_uid=session_uid,
+            prompt=prompt,
+            source_uids=source_uids,
+        )
+        yield {
+            "stage": "generate",
+            "session_uid": session_uid,
+            "intent": str(route.get("intent") or ""),
+        }
         message = self._dispatch_prepared_turn(
             session_uid=session_uid,
             prompt=prompt,
@@ -121,7 +144,9 @@ class PersonalRuntime:
             skill_reflection=skill_reflection,
             reflection=reflection,
         )
-        return self._finish_turn(session_uid=session_uid, prompt=prompt, message=message)
+        yield {"stage": "reflect", "session_uid": session_uid}
+        payload = self._finish_turn(session_uid=session_uid, prompt=prompt, message=message)
+        yield {"stage": "done", "session_uid": session_uid, "payload": payload}
 
     def _normalize_turn_input(self, *, content: str, source_uids: list[str] | None) -> tuple[str, list[str]]:
         prompt = content.strip()
@@ -135,12 +160,15 @@ class PersonalRuntime:
     def _start_turn_session(self, *, session_uid: str, prompt: str, source_uids: list[str]) -> str:
         session = self._ensure_session(session_uid, prompt)
         session_uid = session["session_uid"]
+        self._append_turn_user_message(session_uid=session_uid, prompt=prompt, source_uids=source_uids)
+        return session_uid
+
+    def _append_turn_user_message(self, *, session_uid: str, prompt: str, source_uids: list[str]) -> None:
         attachments: list[dict[str, Any]] = []
         if source_uids:
             attachments = _attachment_metadata(activate_input_sources(self.db_path, project_id=self.project_id, source_uids=source_uids))
         user_metadata = {"attachments": attachments} if attachments else {}
         self._append_message(session_uid, "user", prompt, user_metadata, utc_now())
-        return session_uid
 
     def _prepare_turn_context(
         self,

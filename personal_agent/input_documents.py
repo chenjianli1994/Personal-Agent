@@ -12,6 +12,7 @@ from personal_agent.core.utils import json_dumps, utc_now
 
 
 SUPPORTED_SOURCE_TYPES = {"text", "txt", "md", "docx", "pdf", "xlsx", "xlsm"}
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ def parse_uploaded_source(filename: str, content: bytes) -> ParsedInputSource:
         raise ValueError(f"unsupported file type: .{suffix or 'unknown'}")
     if not content:
         raise ValueError("uploaded file is empty")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise ValueError("uploaded file too large")
     title = Path(original_name).stem or original_name or "上传材料"
     if suffix in {"txt", "md"}:
         text = _decode_text(content).strip()

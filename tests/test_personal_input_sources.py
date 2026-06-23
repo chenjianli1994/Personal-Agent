@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from personal_agent.core.database import connect
 from personal_agent.app import create_personal_app
+from personal_agent.input_documents import MAX_UPLOAD_BYTES
 
 
 def test_personal_text_source_crud_and_active_selection(tmp_path: Path, monkeypatch) -> None:
@@ -112,6 +113,19 @@ def test_personal_upload_rejects_doc_and_does_not_create_artifact_or_knowledge(t
     assert source_count == 1
     assert artifact_count == 0
     assert knowledge_count == 0
+
+
+def test_personal_upload_rejects_oversized_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/personal/sources/upload",
+        files={"file": ("huge.txt", b"a" * (MAX_UPLOAD_BYTES + 1), "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert "too large" in response.json()["detail"]
 
 
 def _client(tmp_path: Path) -> TestClient:

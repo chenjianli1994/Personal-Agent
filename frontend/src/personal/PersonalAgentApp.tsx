@@ -1,5 +1,6 @@
 import {
   Alert,
+  App,
   AutoComplete,
   Button,
   Checkbox,
@@ -19,15 +20,28 @@ import {
   Tag,
   Tooltip,
   Typography,
-  Upload,
-  message
+  Upload
 } from "antd";
 import { BookOutlined, BranchesOutlined, BulbOutlined, CheckCircleOutlined, CloudDownloadOutlined, CodeOutlined, CopyOutlined, DeleteOutlined, DiffOutlined, EditOutlined, ExperimentOutlined, FileDoneOutlined, FileProtectOutlined, FileTextOutlined, HistoryOutlined, MoreOutlined, PlayCircleOutlined, ReloadOutlined, RobotOutlined, SearchOutlined, ThunderboltOutlined, ToolOutlined, UploadOutlined } from "@ant-design/icons";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { personalAgentApi } from "./api";
-import { ChatPanel, composerAcceptedExtensions, maxComposerAttachments } from "./ChatPanel";
+import { ChatPanel } from "./ChatPanel";
 import type { ComposerAttachment, LocalMessage } from "./ChatPanel";
+import { DiffView } from "./DiffView";
+import {
+  ACCEPTED_UPLOAD_ACCEPT,
+  ACCEPTED_UPLOAD_SET,
+  EMPTY_CHAT_DESCRIPTION,
+  MAX_COMPOSER_ATTACHMENTS,
+  MAX_UPLOAD_SIZE,
+  PENDING_MESSAGE,
+  UPLOAD_HINT,
+  friendlyUploadError,
+  formatUploadLimitMb,
+  toMessageAttachments,
+} from "./constants";
+import { useThemeMode } from "./theme";
 import type {
   AgentLlmStatus,
   PatchDirectiveInput,
@@ -38,6 +52,7 @@ import type {
   PersonalInboxItem,
   PersonalKnowledgeItem,
   PersonalLearningCandidate,
+  PersonalChatTurnResult,
   PersonalLlmConfig,
   PersonalLlmConfigInput,
   PersonalSession,
@@ -58,7 +73,12 @@ type ChatTurnVariables = {
   clearAttachmentsOnSuccess?: boolean;
 };
 
+type TurnApplyOptions = Pick<ChatTurnVariables, "clearAttachmentsOnSuccess" | "sessionKey">;
+
 export function PersonalAgentApp() {
+  const { message, modal } = App.useApp();
+  const { mode } = useThemeMode();
+  const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [selectedSessionUid, setSelectedSessionUid] = useState<string>();
   const [draft, setDraft] = useState("");
@@ -82,6 +102,8 @@ export function PersonalAgentApp() {
   const [draftFilterMode, setDraftFilterMode] = useState<"all" | "session" | "task">("session");
   const [renamingSession, setRenamingSession] = useState<PersonalSession>();
   const [renameTitle, setRenameTitle] = useState("");
+  const [typewriterKey, setTypewriterKey] = useState<string>();
+  const [animationVersion, setAnimationVersion] = useState(0);
   const hasAutoSelected = useRef(false);
   const chatAbortControllerRef = useRef<AbortController | null>(null);
 
@@ -119,25 +141,35 @@ export function PersonalAgentApp() {
     }
   });
 
+  const clearTypewriterAnimation = () => {
+    setTypewriterKey(undefined);
+    setAnimationVersion((value) => value + 1);
+  };
+
+  const applyTurnResult = (result: PersonalChatTurnResult, options: TurnApplyOptions) => {
+    setSelectedSessionUid(result.session.session_uid);
+    setOptimisticBySession((items) => omitKey(items, options.sessionKey));
+    setLocalErrorBySession((items) => omitKey(items, options.sessionKey));
+    setPendingChatSessionKey((value) => (value === options.sessionKey ? undefined : value));
+    chatAbortControllerRef.current = null;
+    if (options.clearAttachmentsOnSuccess) setAttachments([]);
+    queryClient.setQueryData(["personal-session", result.session.session_uid], result.session);
+    queryClient.invalidateQueries({ queryKey: ["personal-sessions"] });
+    queryClient.invalidateQueries({ queryKey: ["personal-drafts"] });
+    queryClient.invalidateQueries({ queryKey: ["personal-dev-task-current"] });
+    const learningReflection = result.message?.metadata?.learning_reflection as { candidate_id?: number | null } | undefined;
+    if (learningReflection?.candidate_id) {
+      queryClient.invalidateQueries({ queryKey: ["personal-learning-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["personal-learning-candidates"] });
+      queryClient.invalidateQueries({ queryKey: ["personal-knowledge"] });
+    }
+    setTypewriterKey(result.message?.message_uid);
+  };
+
   const chatTurn = useMutation({
     mutationFn: ({ body, signal }: ChatTurnVariables) => personalAgentApi.chatTurn(body, { signal }),
     onSuccess: (result, variables) => {
-      setSelectedSessionUid(result.session.session_uid);
-      setOptimisticBySession((items) => omitKey(items, variables.sessionKey));
-      setLocalErrorBySession((items) => omitKey(items, variables.sessionKey));
-      setPendingChatSessionKey((value) => (value === variables.sessionKey ? undefined : value));
-      chatAbortControllerRef.current = null;
-      if (variables.clearAttachmentsOnSuccess) setAttachments([]);
-      queryClient.setQueryData(["personal-session", result.session.session_uid], result.session);
-      queryClient.invalidateQueries({ queryKey: ["personal-sessions"] });
-      queryClient.invalidateQueries({ queryKey: ["personal-drafts"] });
-      queryClient.invalidateQueries({ queryKey: ["personal-dev-task-current"] });
-      const learningReflection = result.message?.metadata?.learning_reflection as { candidate_id?: number | null } | undefined;
-      if (learningReflection?.candidate_id) {
-        queryClient.invalidateQueries({ queryKey: ["personal-learning-summary"] });
-        queryClient.invalidateQueries({ queryKey: ["personal-learning-candidates"] });
-        queryClient.invalidateQueries({ queryKey: ["personal-knowledge"] });
-      }
+      applyTurnResult(result, variables);
     },
     onError: (error, variables) => {
       setPendingChatSessionKey((value) => (value === variables.sessionKey ? undefined : value));
@@ -165,7 +197,7 @@ export function PersonalAgentApp() {
     onSuccess: (result) => {
       message.success(`已打开 ${result.file_name}。`);
     },
-    onError: showMutationError
+    onError: showError
   });
 
   const renameSession = useMutation({
@@ -220,7 +252,7 @@ export function PersonalAgentApp() {
   const activeSessionKey = selectedSessionUid ?? NEW_SESSION_KEY;
   const optimistic = optimisticBySession[activeSessionKey] ?? [];
   const localError = localErrorBySession[activeSessionKey] ?? "";
-  const sending = pendingChatSessionKey === activeSessionKey && chatTurn.isPending;
+  const sending = pendingChatSessionKey === activeSessionKey;
   const sendDisabled = Boolean(pendingChatSessionKey && pendingChatSessionKey !== activeSessionKey);
 
   useEffect(() => {
@@ -233,19 +265,31 @@ export function PersonalAgentApp() {
   const addAttachments = (files: File[]) => {
     if (!files.length) return;
     const accepted: ComposerAttachment[] = [];
+    const existingKeys = new Set(attachments.map((item) => `${item.file.name}:${item.file.size}`));
+    const batchKeys = new Set<string>();
     for (const file of files) {
+      const dedupeKey = `${file.name}:${file.size}`;
+      if (existingKeys.has(dedupeKey) || batchKeys.has(dedupeKey)) {
+        message.info(`已添加该文件：${file.name}`);
+        continue;
+      }
       const extension = file.name.split(".").pop()?.toLowerCase() || "";
-      if (!composerAcceptedExtensions.has(extension)) {
+      if (!ACCEPTED_UPLOAD_SET.has(extension)) {
         message.warning(`不支持的文件类型：${file.name}`);
         continue;
       }
+      if (file.size > MAX_UPLOAD_SIZE) {
+        message.warning(`文件过大：${file.name}（上限 ${formatUploadLimitMb()}MB）`);
+        continue;
+      }
+      batchKeys.add(dedupeKey);
       accepted.push({ id: `${file.name}-${file.lastModified}-${file.size}-${crypto.randomUUID()}`, file, status: "ready" });
     }
     if (!accepted.length) return;
     setAttachments((items) => {
-      const remaining = Math.max(0, maxComposerAttachments - items.length);
+      const remaining = Math.max(0, MAX_COMPOSER_ATTACHMENTS - items.length);
       if (accepted.length > remaining) {
-        message.warning(`一次最多添加 ${maxComposerAttachments} 个文件。`);
+        message.warning(`一次最多添加 ${MAX_COMPOSER_ATTACHMENTS} 个文件。`);
       }
       return [...items, ...accepted.slice(0, remaining)];
     });
@@ -253,6 +297,15 @@ export function PersonalAgentApp() {
 
   const removeAttachment = (id: string) => {
     setAttachments((items) => items.filter((item) => item.id !== id));
+  };
+
+  const updatePendingAssistant = (sessionKey: string, content: string) => {
+    setOptimisticBySession((items) => ({
+      ...items,
+      [sessionKey]: (items[sessionKey] ?? []).map((item) =>
+        item.pending && item.role !== "user" ? { ...item, content } : item
+      ),
+    }));
   };
 
   const startChatTurn = ({
@@ -270,19 +323,78 @@ export function PersonalAgentApp() {
   }) => {
     const sessionKey = selectedSessionUid ?? NEW_SESSION_KEY;
     if (pendingChatSessionKey || attachmentsUploading) return false;
+    clearTypewriterAnimation();
     const controller = new AbortController();
+    const body = { session_uid: selectedSessionUid, content, source_uids: sourceUids };
     chatAbortControllerRef.current = controller;
     setPendingChatSessionKey(sessionKey);
     setLocalErrorBySession((items) => omitKey(items, sessionKey));
     if (optimisticMessages) {
       setOptimisticBySession((items) => ({ ...items, [sessionKey]: optimisticMessages }));
     }
-    chatTurn.mutate({
-      body: { session_uid: selectedSessionUid, content, source_uids: sourceUids },
-      sessionKey,
-      signal: controller.signal,
-      restoreDraft,
-      clearAttachmentsOnSuccess
+    let receivedStreamEvent = false;
+    let handledDone = false;
+    let streamedSessionUid = "";
+    const finishStreamFailure = (text: string, aborted = false) => {
+      const errorSessionKey = streamedSessionUid || sessionKey;
+      setPendingChatSessionKey((value) => (value === sessionKey ? undefined : value));
+      chatAbortControllerRef.current = null;
+      if (restoreDraft) setDraft(restoreDraft);
+      setOptimisticBySession((items) => omitKey(items, sessionKey));
+      setLocalErrorBySession((items) => ({ ...items, [errorSessionKey]: text }));
+      if (streamedSessionUid) {
+        setSelectedSessionUid(streamedSessionUid);
+        queryClient.invalidateQueries({ queryKey: ["personal-session", streamedSessionUid] });
+      }
+      queryClient.invalidateQueries({ queryKey: ["personal-sessions"] });
+      if (!aborted) message.error(text);
+    };
+    void personalAgentApi.chatTurnStream(
+      body,
+      (event) => {
+        receivedStreamEvent = true;
+        if (typeof event?.session_uid === "string" && event.session_uid) {
+          streamedSessionUid = event.session_uid;
+        }
+        if (event?.stage === "route") {
+          updatePendingAssistant(sessionKey, "正在理解意图…");
+          return;
+        }
+        if (event?.stage === "generate") {
+          updatePendingAssistant(sessionKey, "正在生成…");
+          return;
+        }
+        if (event?.stage === "reflect") {
+          updatePendingAssistant(sessionKey, "正在沉淀经验…");
+          return;
+        }
+        if (event?.stage === "done") {
+          handledDone = true;
+          applyTurnResult(event.payload, { sessionKey, clearAttachmentsOnSuccess });
+          return;
+        }
+        if (event?.stage === "error") {
+          throw new Error(String(event.error || "stream failed"));
+        }
+      },
+      { signal: controller.signal },
+    ).catch((error) => {
+      if (!receivedStreamEvent) {
+        chatTurn.mutate({
+          body,
+          sessionKey,
+          signal: controller.signal,
+          restoreDraft,
+          clearAttachmentsOnSuccess,
+        });
+        return;
+      }
+      if (isAbortError(error)) {
+        finishStreamFailure("已停止本次回复。", true);
+        return;
+      }
+      if (handledDone) return;
+      finishStreamFailure(error instanceof Error ? error.message : String(error));
     });
     return true;
   };
@@ -290,6 +402,24 @@ export function PersonalAgentApp() {
   const cancelChatTurn = () => {
     if (!pendingChatSessionKey) return;
     chatAbortControllerRef.current?.abort();
+  };
+
+  const regenerate = () => {
+    if (pendingChatSessionKey || attachmentsUploading) return;
+    const messages = selectedSession?.messages ?? [];
+    const lastUser = [...messages].reverse().find((item) => item.role === "user");
+    if (!lastUser) return;
+    clearTypewriterAnimation();
+    const now = new Date().toISOString();
+    const sourceUids = toMessageAttachments(lastUser.metadata?.attachments)
+      .map((attachment) => attachment.source_uid || "")
+      .filter(Boolean);
+    startChatTurn({
+      content: lastUser.content,
+      sourceUids,
+      optimisticMessages: [{ role: "assistant", content: PENDING_MESSAGE, created_at: now, pending: true }],
+      restoreDraft: draft,
+    });
   };
 
   const send = async () => {
@@ -304,27 +434,42 @@ export function PersonalAgentApp() {
     setInputHistoryIndex(null);
     setDraft("");
     setLocalErrorBySession((items) => omitKey(items, activeSessionKey));
+    clearTypewriterAnimation();
     let sourceUids: string[] = [];
     if (attachments.length) {
       setAttachmentsUploading(true);
       try {
-        const uploaded: string[] = [];
-        for (const attachment of attachments) {
+        const results = await Promise.allSettled(attachments.map(async (attachment) => {
           if (attachment.status === "uploaded" && attachment.sourceUid) {
-            uploaded.push(attachment.sourceUid);
-            continue;
+            return attachment.sourceUid;
           }
-          setAttachments((items) => items.map((item) => (item.id === attachment.id ? { ...item, status: "uploading", error: undefined } : item)));
-          const source = await personalAgentApi.uploadSource(attachment.file, { make_active: false });
-          uploaded.push(source.source_uid);
-          setAttachments((items) => items.map((item) => (item.id === attachment.id ? { ...item, status: "uploaded", sourceUid: source.source_uid } : item)));
+          setAttachments((items) => items.map((item) => (item.id === attachment.id ? { ...item, status: "uploading", error: undefined, progress: 0 } : item)));
+          try {
+            const source = await personalAgentApi.uploadSource(attachment.file, {
+              make_active: false,
+              onProgress: (progress) => {
+                setAttachments((items) => items.map((item) => (item.id === attachment.id ? { ...item, status: "uploading", progress } : item)));
+              },
+            });
+            setAttachments((items) => items.map((item) => (item.id === attachment.id ? { ...item, status: "uploaded", sourceUid: source.source_uid, progress: 100 } : item)));
+            return source.source_uid;
+          } catch (error) {
+            const text = friendlyUploadError(error instanceof Error ? error.message : String(error), error);
+            setAttachments((items) => items.map((item) => (item.id === attachment.id ? { ...item, status: "error", error: text, progress: undefined } : item)));
+            throw new Error(text);
+          }
+        }));
+        const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (rejected) {
+          throw rejected.reason;
         }
-        sourceUids = uploaded;
+        sourceUids = results
+          .filter((result): result is PromiseFulfilledResult<string> => result.status === "fulfilled")
+          .map((result) => result.value);
       } catch (error) {
-        const text = error instanceof Error ? error.message : String(error);
+        const text = friendlyUploadError(error instanceof Error ? error.message : String(error), error);
         setLocalErrorBySession((items) => ({ ...items, [activeSessionKey]: text }));
         message.error(text);
-        setAttachments((items) => items.map((item) => (item.status === "uploading" ? { ...item, status: "error", error: text } : item)));
         setDraft(content);
         setAttachmentsUploading(false);
         return;
@@ -342,7 +487,7 @@ export function PersonalAgentApp() {
       sourceUids,
       optimisticMessages: [
         { role: "user", content, created_at: now, metadata: optimisticAttachments.length ? { attachments: optimisticAttachments } : {} },
-        { role: "assistant", content: "Agent 正在思考。", created_at: now, pending: true }
+        { role: "assistant", content: PENDING_MESSAGE, created_at: now, pending: true }
       ],
       restoreDraft: content,
       clearAttachmentsOnSuccess: true
@@ -362,17 +507,20 @@ export function PersonalAgentApp() {
 
   return (
     <Layout className="personal-agent-shell">
-      <Layout.Sider width={300} theme="light" className="personal-agent-sidebar">
+      <Layout.Sider width={300} theme={mode} className="personal-agent-sidebar">
         <Sidebar
           sessions={sessions}
           selectedSessionUid={selectedSessionUid}
-          onSelect={setSelectedSessionUid}
+          onSelect={(sessionUid) => {
+            clearTypewriterAnimation();
+            setSelectedSessionUid(sessionUid);
+          }}
           onRename={(session) => {
             setRenamingSession(session);
             setRenameTitle(session.title || "");
           }}
           onDelete={(session) => {
-            Modal.confirm({
+            modal.confirm({
               title: "删除会话",
               content: `确定删除“${session.title || "Agent 会话"}”？`,
               okText: "删除",
@@ -382,7 +530,7 @@ export function PersonalAgentApp() {
             });
           }}
           onBulkDelete={(sessionUids, onDeleted) => {
-            Modal.confirm({
+            modal.confirm({
               title: "批量删除会话",
               content: `确定删除选中的 ${sessionUids.length} 个会话？`,
               okText: "删除",
@@ -393,6 +541,7 @@ export function PersonalAgentApp() {
           }}
           bulkDeleting={deleteSessions.isPending}
           onNew={() => {
+            clearTypewriterAnimation();
             setSelectedSessionUid(undefined);
             setLocalErrorBySession((items) => omitKey(items, NEW_SESSION_KEY));
             setOptimisticBySession((items) => omitKey(items, NEW_SESSION_KEY));
@@ -414,6 +563,7 @@ export function PersonalAgentApp() {
           setInputHistoryIndex={setInputHistoryIndex}
           onSend={send}
           onRetry={send}
+          onRegenerate={regenerate}
           sending={sending}
           sendDisabled={sendDisabled}
           onCancelSend={cancelChatTurn}
@@ -438,6 +588,8 @@ export function PersonalAgentApp() {
           onOpenLearning={() => setLearningOpen(true)}
           onOpenCodebase={() => setCodebaseOpen(true)}
           onOpenSkills={() => setSkillsOpen(true)}
+          typewriterKey={typewriterKey}
+          animationVersion={animationVersion}
         />
       </Layout.Content>
       <Drawer title="输入材料" open={sourcesOpen} onClose={() => setSourcesOpen(false)} width={760}>
@@ -659,6 +811,8 @@ function Sidebar({
 }
 
 function SourcesPanel() {
+  const { message, modal } = App.useApp();
+  const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -700,10 +854,11 @@ function SourcesPanel() {
       refreshSources(source);
       message.success("输入材料已保存。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const uploadSource = useMutation({
-    mutationFn: (file: File) => personalAgentApi.uploadSource(file, { make_active: true }),
+    mutationFn: ({ file, onProgress }: { file: File; onProgress?: (percent: number) => void }) =>
+      personalAgentApi.uploadSource(file, { make_active: true, onProgress }),
     onSuccess: (source) => {
       setFailedUploadFile(undefined);
       setFailedUploadError("");
@@ -711,9 +866,10 @@ function SourcesPanel() {
       message.success("文件已解析。");
     },
     onError: (error, file) => {
-      setFailedUploadFile(file);
-      setFailedUploadError(error instanceof Error ? error.message : String(error));
-      showMutationError(error);
+      const text = friendlyUploadError(error instanceof Error ? error.message : String(error), error);
+      setFailedUploadFile(file.file);
+      setFailedUploadError(text);
+      message.error(text);
     }
   });
   const activateSource = useMutation({
@@ -722,7 +878,7 @@ function SourcesPanel() {
       refreshSources(source);
       message.success("已设为当前材料。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const deleteSource = useMutation({
     mutationFn: personalAgentApi.deleteSource,
@@ -734,7 +890,7 @@ function SourcesPanel() {
       }
       message.success("输入材料已清除。");
     },
-    onError: showMutationError
+    onError: showError
   });
 
   return (
@@ -776,7 +932,7 @@ function SourcesPanel() {
                     showIcon
                     message={failedUploadError || "文件上传失败"}
                     action={
-                      <Button size="small" icon={<ReloadOutlined />} loading={uploadSource.isPending} onClick={() => uploadSource.mutate(failedUploadFile)}>
+                      <Button size="small" icon={<ReloadOutlined />} loading={uploadSource.isPending} onClick={() => uploadSource.mutate({ file: failedUploadFile })}>
                         重试
                       </Button>
                     }
@@ -784,11 +940,23 @@ function SourcesPanel() {
                 ) : null}
                 <Upload.Dragger
                   multiple={false}
-                  showUploadList={false}
-                  accept=".txt,.md,.docx,.pdf,.xlsx,.xlsm"
+                  showUploadList={{ showRemoveIcon: false }}
+                  accept={ACCEPTED_UPLOAD_ACCEPT}
+                  beforeUpload={(file) => {
+                    if (file.size > MAX_UPLOAD_SIZE) {
+                      message.warning(`文件过大：${file.name}（上限 ${formatUploadLimitMb()}MB）`);
+                      return Upload.LIST_IGNORE;
+                    }
+                    const extension = file.name.split(".").pop()?.toLowerCase() || "";
+                    if (!ACCEPTED_UPLOAD_SET.has(extension)) {
+                      message.warning(`不支持的文件类型：${file.name}`);
+                      return Upload.LIST_IGNORE;
+                    }
+                    return true;
+                  }}
                   customRequest={(options) => {
                     const file = options.file as File;
-                    uploadSource.mutate(file, {
+                    uploadSource.mutate({ file, onProgress: (percent) => options.onProgress?.({ percent }) }, {
                       onSuccess: () => options.onSuccess?.({}, file),
                       onError: (error) => options.onError?.(error as Error)
                     });
@@ -796,7 +964,7 @@ function SourcesPanel() {
                 >
                   <p className="ant-upload-drag-icon"><UploadOutlined /></p>
                   <p className="ant-upload-text">拖入或选择输入材料</p>
-                  <p className="ant-upload-hint">支持 txt、md、docx、pdf、xlsx、xlsm</p>
+                  <p className="ant-upload-hint">{UPLOAD_HINT}</p>
                 </Upload.Dragger>
               </Space>
             )
@@ -831,7 +999,7 @@ function SourcesPanel() {
                         loading={deleteSource.isPending}
                         onClick={(event) => {
                           event.stopPropagation();
-                          Modal.confirm({
+                          modal.confirm({
                             title: "清除输入材料",
                             content: `确定清除“${item.title}”？`,
                             okText: "清除",
@@ -912,6 +1080,8 @@ function ArtifactDraftsPanel({
   filterMode: "all" | "session" | "task";
   onFilterModeChange: (value: "all" | "session" | "task") => void;
 }) {
+  const { message } = App.useApp();
+  const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [draftTitle, setDraftTitle] = useState("");
   const [documentType, setDocumentType] = useState("requirement_analysis_report");
@@ -997,7 +1167,7 @@ function ArtifactDraftsPanel({
       refreshDrafts(draft);
       message.success("草稿 v1 已创建。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const reviseDraft = useMutation({
     mutationFn: ({ draftUid, content }: { draftUid: string; content: string }) =>
@@ -1006,7 +1176,7 @@ function ArtifactDraftsPanel({
       refreshDrafts(draft);
       message.success(`已保存 v${draft.current_revision}。`);
     },
-    onError: showMutationError
+    onError: showError
   });
   const reviseDraftNatural = useMutation({
     mutationFn: ({ draftUid, feedback }: { draftUid: string; feedback: string }) =>
@@ -1016,7 +1186,7 @@ function ArtifactDraftsPanel({
       refreshDrafts(draft);
       message.success(`已根据修订意见生成 v${draft.current_revision}。`);
     },
-    onError: showMutationError
+    onError: showError
   });
   const activateDraft = useMutation({
     mutationFn: personalAgentApi.activateDraft,
@@ -1024,7 +1194,7 @@ function ArtifactDraftsPanel({
       refreshDrafts(draft);
       message.success("已设为当前草稿。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const exportDraft = useMutation({
     mutationFn: ({ draftUid, format }: { draftUid: string; format: string }) =>
@@ -1033,7 +1203,7 @@ function ArtifactDraftsPanel({
       message.success(`已导出 ${result.file_name}。`);
       window.open(personalAgentApi.draftDownloadUrl(result.draft_uid, result.export_format), "_blank", "noopener,noreferrer");
     },
-    onError: showMutationError
+    onError: showError
   });
   const regenerateDraft = useMutation({
     mutationFn: (draft: PersonalArtifactDraft) => {
@@ -1071,11 +1241,12 @@ function ArtifactDraftsPanel({
       refreshDrafts(draft);
       message.success("已重新生成 draft。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const exportOptions = draftDetail ? exportFormatOptionsForDraft(draftDetail) : [];
   const compareRevision = draftDetail?.revisions?.find((item) => item.revision_index === compareRevisionIndex);
   const compareText = draftDetail && compareRevision ? buildLineDiff(compareRevision.content, draftDetail.content || "") : "";
+  const previewIsDiff = draftDetail ? isDiffDraft(draftDetail) : false;
 
   return (
     <div className="artifact-panel">
@@ -1266,7 +1437,11 @@ function ArtifactDraftsPanel({
                                     按方向修订
                                   </Button>
                                 </div>
-                                <pre className="artifact-preview-text artifact-preview-text-large">{previewContent}</pre>
+                                {previewIsDiff ? (
+                                  <DiffView text={previewContent} className="artifact-preview-text artifact-preview-text-large diff-view" />
+                                ) : (
+                                  <pre className="artifact-preview-text artifact-preview-text-large">{previewContent}</pre>
+                                )}
                               </Space>
                             )
                           },
@@ -1360,7 +1535,7 @@ function ArtifactDraftsPanel({
                                     placeholder="选择历史版本"
                                   />
                                   {compareText ? (
-                                    <pre className="artifact-diff-text">{compareText}</pre>
+                                    <DiffView text={compareText} />
                                   ) : (
                                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择一个历史版本查看 diff" />
                                   )}
@@ -1388,6 +1563,8 @@ function ArtifactDraftsPanel({
 }
 
 function KnowledgePanel() {
+  const { message } = App.useApp();
+  const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [selectedSourceUid, setSelectedSourceUid] = useState("");
   const [query, setQuery] = useState("");
@@ -1408,12 +1585,12 @@ function KnowledgePanel() {
       queryClient.invalidateQueries({ queryKey: ["personal-knowledge"] });
       message.success("输入材料已导入知识库。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const search = useMutation({
     mutationFn: personalAgentApi.searchKnowledge,
     onSuccess: setHits,
-    onError: showMutationError
+    onError: showError
   });
   const deprecate = useMutation({
     mutationFn: (knowledgeId: number) => personalAgentApi.deprecateKnowledge(knowledgeId, { reviewer: "local_user", comment: "personal knowledge deprecated" }),
@@ -1421,7 +1598,7 @@ function KnowledgePanel() {
       queryClient.invalidateQueries({ queryKey: ["personal-knowledge"] });
       message.success("知识条目已废弃。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const visibleItems = hits.length ? hits : items;
 
@@ -1485,6 +1662,8 @@ function KnowledgePanel() {
 }
 
 function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: string }) {
+  const { message } = App.useApp();
+  const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [feedback, setFeedback] = useState("");
   const [correctedBehavior, setCorrectedBehavior] = useState("");
@@ -1512,7 +1691,7 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
       refresh();
       message.success("学习候选已创建。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const approve = useMutation({
     mutationFn: (candidateId: number) => personalAgentApi.approveLearningCandidate(candidateId, { reviewer: "local_user", comment: "personal learning approved" }),
@@ -1520,7 +1699,7 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
       refresh();
       message.success("经验已批准为长期规则。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const reject = useMutation({
     mutationFn: (candidateId: number) => personalAgentApi.rejectLearningCandidate(candidateId, { reviewer: "local_user", comment: "personal learning rejected" }),
@@ -1528,7 +1707,7 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
       refresh();
       message.success("经验已拒绝。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const dismiss = useMutation({
     mutationFn: (itemUid: string) => personalAgentApi.dismissMemoryLesson(itemUid, { reviewer: "local_user", comment: "personal memory dismissed" }),
@@ -1536,7 +1715,7 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
       refresh();
       message.success("记忆经验已撤销。");
     },
-    onError: showMutationError
+    onError: showError
   });
 
   return (
@@ -1811,6 +1990,8 @@ function GenerationMetadataSummary({ draft }: { draft: PersonalArtifactDraft }) 
 }
 
 function SkillsPanel() {
+  const { message } = App.useApp();
+  const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [selectedSkillName, setSelectedSkillName] = useState<string>();
 
@@ -1845,7 +2026,7 @@ function SkillsPanel() {
       queryClient.invalidateQueries({ queryKey: ["personal-skill", skillName] });
       message.success("Skill 评测完成。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const approveSkillCandidate = useMutation({
     mutationFn: (candidate: PersonalSkillUpdateCandidate) =>
@@ -1856,7 +2037,7 @@ function SkillsPanel() {
       queryClient.invalidateQueries({ queryKey: ["personal-skill-versions"] });
       message.success("Skill 修改候选已批准并激活新版本。");
     },
-    onError: showMutationError
+    onError: showError
   });
   const rejectSkillCandidate = useMutation({
     mutationFn: (candidate: PersonalSkillUpdateCandidate) =>
@@ -1865,7 +2046,7 @@ function SkillsPanel() {
       queryClient.invalidateQueries({ queryKey: ["personal-skill-update-candidates"] });
       message.success("Skill 修改候选已驳回。");
     },
-    onError: showMutationError
+    onError: showError
   });
 
   return (
@@ -2113,6 +2294,8 @@ function CodebasePanel({
   config?: PersonalCodebaseConfig;
   onConfigChanged: () => void;
 }) {
+  const { message } = App.useApp();
+  const showError = useMutationErrorHandler();
   const [repoPath, setRepoPath] = useState("");
   const [buildCommand, setBuildCommand] = useState("");
   const [testCommand, setTestCommand] = useState("");
@@ -2151,7 +2334,7 @@ function CodebasePanel({
       message.success("代码库配置已保存。");
       onConfigChanged();
     },
-    onError: showMutationError
+    onError: showError
   });
   const runTool = <T,>(mutationFn: (input: T) => Promise<PersonalToolResult>) =>
     useMutation({
@@ -2162,7 +2345,7 @@ function CodebasePanel({
         const output = asRecord(result.output);
         if (typeof output.patch_text === "string") setPatchText(output.patch_text);
       },
-      onError: showMutationError
+      onError: showError
     });
   const index = runTool(personalAgentApi.codebaseIndex);
   const search = runTool(personalAgentApi.codebaseSearch);
@@ -2442,6 +2625,10 @@ function defaultExportFormat(draft: PersonalArtifactDraft) {
   return exportFormatOptionsForDraft(draft)[0] || "md";
 }
 
+function isDiffDraft(draft: PersonalArtifactDraft) {
+  return draft.content_format === "diff" || ["c_code_diff", "unit_test_code_or_diff"].includes(draft.document_type);
+}
+
 function buildLineDiff(before: string, after: string) {
   const oldLines = before.split(/\r?\n/);
   const newLines = after.split(/\r?\n/);
@@ -2460,8 +2647,11 @@ function buildLineDiff(before: string, after: string) {
   return rows.join("\n");
 }
 
-function showMutationError(error: unknown) {
-  message.error(error instanceof Error ? error.message : String(error));
+function useMutationErrorHandler() {
+  const { message } = App.useApp();
+  return (error: unknown) => {
+    message.error(error instanceof Error ? error.message : String(error));
+  };
 }
 
 function pickCurrentTask(tasks: PersonalDevTask[]): PersonalDevTask | undefined {

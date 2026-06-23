@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, apiPostForm, apiPut } from "../api/client";
+import { apiDelete, apiGet, apiPost, apiPut, apiStream, apiUpload } from "../api/client";
 import type {
   AgentLlmStatus,
   CodebaseIndexInput,
@@ -68,12 +68,12 @@ export const personalAgentApi = {
   sources: () => apiGet<PersonalInputSource[]>("/api/personal/sources"),
   source: (sourceUid: string) => apiGet<PersonalInputSource>(`/api/personal/sources/${encodeURIComponent(sourceUid)}`),
   createTextSource: (body: PersonalSourceTextInput) => apiPost<PersonalSourceTextInput, PersonalInputSource>("/api/personal/sources/text", body),
-  uploadSource: (file: File, input?: { title?: string; make_active?: boolean }) => {
+  uploadSource: (file: File, input?: { title?: string; make_active?: boolean; onProgress?: (percent: number) => void }) => {
     const body = new FormData();
     body.append("file", file);
     if (input?.title) body.append("title", input.title);
     body.append("make_active", String(input?.make_active ?? true));
-    return apiPostForm<PersonalInputSource>("/api/personal/sources/upload", body);
+    return apiUpload<PersonalInputSource>("/api/personal/sources/upload", body, input?.onProgress);
   },
   activateSource: (sourceUid: string) => apiPost<undefined, PersonalInputSource>(`/api/personal/sources/${encodeURIComponent(sourceUid)}/activate`),
   deleteSource: (sourceUid: string) => apiDelete<{ status: string; source_uid: string; active_source_uid: string }>(`/api/personal/sources/${encodeURIComponent(sourceUid)}`),
@@ -120,7 +120,12 @@ export const personalAgentApi = {
     apiPut<PersonalSessionRenameInput, PersonalSession>(`/api/personal/sessions/${encodeURIComponent(sessionUid)}/title`, body),
   deleteSession: (sessionUid: string) => apiDelete<{ status: string; session_uid: string }>(`/api/personal/sessions/${encodeURIComponent(sessionUid)}`),
   chatTurn: (body: PersonalChatTurnInput, init?: { signal?: AbortSignal }) =>
-    apiPost<PersonalChatTurnInput, PersonalChatTurnResult>("/api/personal/chat/turn", body, init),
+    apiPost<PersonalChatTurnInput, PersonalChatTurnResult>("/api/personal/chat/turn", body, { ...init, timeoutMs: 0 }),
+  chatTurnStream: (
+    body: PersonalChatTurnInput,
+    onEvent: (event: any) => void,
+    init?: { signal?: AbortSignal },
+  ) => apiStream("/api/personal/chat/turn/stream", body, onEvent, { ...init, timeoutMs: 0 }),
   devTaskList: (sessionUid?: string, status?: string) =>
     apiGet<PersonalDevTask[]>(params("/api/personal/dev-tasks", { session_uid: sessionUid, status })),
   devTaskGet: (taskUid: string) => apiGet<PersonalDevTask>(`/api/personal/dev-tasks/${encodeURIComponent(taskUid)}`),
