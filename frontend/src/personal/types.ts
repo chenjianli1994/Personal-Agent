@@ -413,6 +413,18 @@ export type PersonalToolResult<T = Record<string, unknown>> = {
   confirmation?: string;
 };
 
+export type CodebaseIndexStreamEvent = {
+  event: "started" | "progress" | "done" | "error" | "cancelled";
+  status: string;
+  phase: string;
+  scanned_count: number;
+  total_count?: number | null;
+  estimated_total_count?: number | null;
+  message: string;
+  error?: string;
+  result?: PersonalToolResult<Record<string, unknown>>;
+};
+
 export type CodebaseIndexInput = {
   repo_path?: string;
   query?: string;

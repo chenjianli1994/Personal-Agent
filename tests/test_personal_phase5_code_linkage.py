@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 
@@ -323,6 +324,36 @@ def test_codebase_search_uses_preview_fallback_without_writing_db(tmp_path: Path
         files = [dict(item) for item in conn.execute("SELECT * FROM code_files WHERE repository_id=?", (repo_id,)).fetchall()]
     assert after == original_preview
     assert "speed.c" in _files_containing_type(db_path, repo_id, files, "PhaseTwoFallbackType", 5)
+
+
+def test_codebase_index_stream_emits_started_progress_and_done(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client, _db_path, _repo, _test_command = _client_with_code_repo(tmp_path)
+
+    events: list[dict[str, object]] = []
+    with client.stream(
+        "POST",
+        "/api/personal/codebase/index/stream",
+        json={"query": "VehicleSpeed_Read speed invalid default", "max_files": 20},
+    ) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+            events.append(json.loads(line[6:]))
+
+    assert events
+    assert events[0]["event"] == "started"
+    assert any(event["event"] == "progress" for event in events)
+    assert events[-1]["event"] == "done"
+    done = events[-1]
+    assert done["status"] == "done"
+    assert done["scanned_count"] >= 1
+    assert done["total_count"] >= 1
+    result = done["result"]
+    assert isinstance(result, dict)
+    assert result["tool_name"] == "codebase_index"
+    assert result["output"]["exists"] is True
 
 
 def _client_with_code_repo(tmp_path: Path) -> tuple[TestClient, Path, Path, str]:

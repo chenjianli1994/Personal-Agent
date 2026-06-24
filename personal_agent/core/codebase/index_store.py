@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..database import connect
 from ..utils import json_dumps, utc_now
 from .c_parser import parse_code_file
 from .file_text import source_preview
-from .scanner import scan_code_repository
+from .scanner import CodebaseIndexCancelled, scan_code_repository
 from .schemas import (
     ParsedCallEdge,
     ParsedConditionalBlock,
@@ -45,18 +45,45 @@ def build_and_store_index(
     max_files: int = 160,
     skip_dirs: list[str] | None = None,
     batch_size: int = 0,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     repo = resolve_repo_path(db_path, project_id, repo_path)
     if not repo:
         return _missing_index(project_id, "project input code_repo_path is not configured")
-    scan = scan_code_repository(repo, max_files=max_files, skip_dirs=skip_dirs, batch_size=batch_size)
+    _emit_index_progress(
+        progress_callback,
+        phase="scan",
+        scanned_count=0,
+        total_count=None,
+        estimated_total_count=None,
+        message="正在扫描代码仓库文件……",
+    )
+    scan = scan_code_repository(
+        repo,
+        max_files=max_files,
+        skip_dirs=skip_dirs,
+        batch_size=batch_size,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
     if not repo.exists() or not repo.is_dir():
         return _missing_index(project_id, scan["limitations"][0] if scan["limitations"] else f"code repository does not exist: {repo}", repo)
+    total_files = len(scan["files"])
+    _emit_index_progress(
+        progress_callback,
+        phase="index",
+        scanned_count=0,
+        total_count=total_files,
+        estimated_total_count=total_files,
+        message="文件扫描完成，开始建立索引……" if total_files else "未发现可索引文件，正在写入索引结果……",
+    )
 
     now = utc_now()
     changed_file_count = 0
     reused_file_count = 0
     deleted_file_count = 0
+    processed_file_count = 0
     parsed_by_file: dict[str, ParsedCodeFile] = {}
     parser_names: list[str] = []
     parser_confidences: list[float] = []
@@ -68,11 +95,13 @@ def build_and_store_index(
         scanned_by_path = {file.rel_path: file for file in scan["files"]}
         deleted_paths = [path for path in previous_files if path not in scanned_by_path]
         for path in deleted_paths:
+            _raise_if_cancelled(cancel_check)
             _delete_file_index(conn, repo_id, int(previous_files[path]["id"]))
             deleted_file_count += 1
 
         file_ids: dict[str, int] = {}
         for file in scan["files"]:
+            _raise_if_cancelled(cancel_check)
             previous = previous_files.get(file.rel_path)
             if (
                 previous
@@ -97,10 +126,30 @@ def build_and_store_index(
             else:
                 file_ids[file.rel_path] = _insert_file(conn, repo_id, file, parsed, now)
             changed_file_count += 1
+            processed_file_count += 1
+            if _should_report_index_progress(processed_file_count, total_files):
+                _emit_index_progress(
+                    progress_callback,
+                    phase="index",
+                    scanned_count=processed_file_count,
+                    total_count=total_files,
+                    estimated_total_count=total_files,
+                    message=f"正在建立索引：{file.rel_path}",
+                )
 
         symbol_count = 0
         include_count = 0
+        if total_files:
+            _emit_index_progress(
+                progress_callback,
+                phase="finalize",
+                scanned_count=total_files,
+                total_count=total_files,
+                estimated_total_count=total_files,
+                message="正在写入符号与依赖关系……",
+            )
         for rel_path, parsed in parsed_by_file.items():
+            _raise_if_cancelled(cancel_check)
             file_id = file_ids[rel_path]
             for symbol in _dedupe_symbols(parsed.symbols):
                 _insert_symbol(conn, repo_id, file_id, symbol)
@@ -164,6 +213,46 @@ def build_and_store_index(
         "index_run": run_stats,
         "files": scan["files"],
     }
+
+
+def _raise_if_cancelled(cancel_check: Callable[[], bool] | None) -> None:
+    if cancel_check and cancel_check():
+        raise CodebaseIndexCancelled("代码库索引已取消。")
+
+
+def _should_report_index_progress(processed_count: int, total_count: int) -> bool:
+    if total_count <= 0:
+        return False
+    if processed_count >= total_count:
+        return True
+    if processed_count <= 3:
+        return True
+    if total_count <= 20:
+        return processed_count % 5 == 0
+    return processed_count % 10 == 0
+
+
+def _emit_index_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    *,
+    phase: str,
+    scanned_count: int,
+    total_count: int | None,
+    estimated_total_count: int | None,
+    message: str,
+) -> None:
+    if not progress_callback:
+        return
+    progress_callback(
+        {
+            "status": "running",
+            "phase": phase,
+            "scanned_count": scanned_count,
+            "total_count": total_count,
+            "estimated_total_count": estimated_total_count,
+            "message": message,
+        }
+    )
 
 
 def latest_repository(db_path: Path, project_id: int) -> dict[str, Any] | None:

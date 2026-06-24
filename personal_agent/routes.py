@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from personal_agent.core.codebase.index_store import latest_repository
+from personal_agent.core.codebase.retriever import build_codebase_index
+from personal_agent.core.codebase.scanner import CodebaseIndexCancelled
 from personal_agent.core.database import connect
 from personal_agent.core.llm_admin import read_personal_llm_admin_config, save_personal_llm_admin_config
 from personal_agent.core.schemas import LlmAdminConfigRequest
@@ -1056,6 +1061,138 @@ def register_personal_agent_routes(
             },
         )
 
+    @app.post("/api/personal/codebase/index/stream")
+    async def personal_codebase_index_stream(req: PersonalCodebaseIndexRequest, request: Request) -> StreamingResponse:
+        _require_capability(context, "codebase")
+
+        async def event_stream():
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+            cancel_flag = threading.Event()
+            latest = {
+                "phase": "scan",
+                "scanned_count": 0,
+                "total_count": None,
+                "estimated_total_count": None,
+                "message": "开始扫描代码仓库……",
+            }
+
+            def publish(payload: dict[str, Any]) -> None:
+                loop.call_soon_threadsafe(queue.put_nowait, payload)
+
+            def on_progress(payload: dict[str, Any]) -> None:
+                latest.update(
+                    {
+                        "phase": payload.get("phase") or latest["phase"],
+                        "scanned_count": int(payload.get("scanned_count") or 0),
+                        "total_count": payload.get("total_count"),
+                        "estimated_total_count": payload.get("estimated_total_count"),
+                        "message": str(payload.get("message") or latest["message"]),
+                    }
+                )
+                publish(
+                    _codebase_index_stream_payload(
+                        event="progress",
+                        status=str(payload.get("status") or "running"),
+                        phase=str(latest["phase"] or "index"),
+                        scanned_count=int(latest["scanned_count"] or 0),
+                        total_count=_as_optional_int(latest["total_count"]),
+                        estimated_total_count=_as_optional_int(latest["estimated_total_count"]),
+                        message=str(latest["message"] or ""),
+                    )
+                )
+
+            def worker() -> None:
+                try:
+                    result = build_codebase_index(
+                        context.db_path,
+                        context.project_id,
+                        repo_path=req.repo_path,
+                        query=req.query,
+                        max_files=req.max_files,
+                        skip_dirs=req.skip_dirs,
+                        batch_size=req.batch_size,
+                        progress_callback=on_progress,
+                        cancel_check=cancel_flag.is_set,
+                    )
+                    if not result.get("exists"):
+                        raise ValueError((result.get("limitations") or ["代码库索引失败。"])[0])
+                    file_count = int(result.get("file_count") or latest["scanned_count"] or 0)
+                    publish(
+                        _codebase_index_stream_payload(
+                            event="done",
+                            status="done",
+                            phase="done",
+                            scanned_count=file_count,
+                            total_count=file_count,
+                            estimated_total_count=file_count,
+                            message="代码库索引完成。",
+                            result=_codebase_index_stream_result(result),
+                        )
+                    )
+                except CodebaseIndexCancelled as exc:
+                    publish(
+                        _codebase_index_stream_payload(
+                            event="cancelled",
+                            status="cancelled",
+                            phase=str(latest["phase"] or "index"),
+                            scanned_count=int(latest["scanned_count"] or 0),
+                            total_count=_as_optional_int(latest["total_count"]),
+                            estimated_total_count=_as_optional_int(latest["estimated_total_count"]),
+                            message=str(exc),
+                        )
+                    )
+                except Exception as exc:
+                    publish(
+                        _codebase_index_stream_payload(
+                            event="error",
+                            status="error",
+                            phase=str(latest["phase"] or "index"),
+                            scanned_count=int(latest["scanned_count"] or 0),
+                            total_count=_as_optional_int(latest["total_count"]),
+                            estimated_total_count=_as_optional_int(latest["estimated_total_count"]),
+                            message=str(exc),
+                            error=str(exc),
+                        )
+                    )
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            publish(
+                _codebase_index_stream_payload(
+                    event="started",
+                    status="started",
+                    phase="scan",
+                    scanned_count=0,
+                    total_count=None,
+                    estimated_total_count=None,
+                    message="开始扫描代码仓库……",
+                )
+            )
+            worker_task = asyncio.create_task(asyncio.to_thread(worker))
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        cancel_flag.set()
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=0.2)
+                    except asyncio.TimeoutError:
+                        if worker_task.done() and queue.empty():
+                            break
+                        continue
+                    if item is None:
+                        break
+                    yield f"data: {json_dumps(item)}\n\n"
+            finally:
+                cancel_flag.set()
+                await asyncio.gather(worker_task, return_exceptions=True)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @app.post("/api/personal/codebase/search")
     def personal_codebase_search(req: PersonalCodebaseSearchRequest) -> dict[str, Any]:
         _require_capability(context, "codebase")
@@ -1273,3 +1410,52 @@ def _model_to_dict(model: Any) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def _codebase_index_stream_payload(
+    *,
+    event: str,
+    status: str,
+    phase: str,
+    scanned_count: int,
+    total_count: int | None,
+    estimated_total_count: int | None,
+    message: str,
+    result: dict[str, Any] | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "event": event,
+        "status": status,
+        "phase": phase,
+        "scanned_count": scanned_count,
+        "total_count": total_count,
+        "estimated_total_count": estimated_total_count,
+        "message": message,
+    }
+    if result is not None:
+        payload["result"] = result
+    if error:
+        payload["error"] = error
+    return payload
+
+
+def _codebase_index_stream_result(output: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "invocation_uid": f"stream_codebase_index_{uuid4().hex[:12]}",
+        "tool": "codebase_index",
+        "tool_name": "codebase_index",
+        "status": "ok",
+        "error": "",
+        "output": output,
+        "side_effect_level": "read",
+        "risk_level": "read_only",
+        "dry_run": False,
+        "confirmation": "not_needed",
+    }
+
+
+def _as_optional_int(value: Any) -> int | None:
+    if value in {None, ""}:
+        return None
+    return int(value)

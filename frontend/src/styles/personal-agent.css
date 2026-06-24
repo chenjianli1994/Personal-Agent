@@ -702,6 +702,46 @@
   padding: 10px 0;
 }
 
+.codebase-index-progress {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  background: var(--pa-surface-soft);
+}
+
+.codebase-index-progress-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.codebase-index-progress-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.codebase-indeterminate-progress {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pa-accent-soft) 76%, var(--pa-surface));
+}
+
+.codebase-indeterminate-progress span {
+  position: absolute;
+  inset: 0 auto 0 -35%;
+  width: 35%;
+  border-radius: inherit;
+  background: var(--pa-accent);
+  animation: pa-slide 1.2s ease-in-out infinite;
+}
+
 .codebase-mono textarea,
 .codebase-result {
   font-family: Consolas, "Courier New", monospace;
@@ -1114,10 +1154,21 @@
   }
 }
 
+@keyframes pa-slide {
+  0% {
+    transform: translateX(0);
+  }
+
+  100% {
+    transform: translateX(380%);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .pending-dots i,
   .tw-caret,
-  .bubble-actions {
+  .bubble-actions,
+  .codebase-indeterminate-progress span {
     animation: none;
     transition: none;
   }

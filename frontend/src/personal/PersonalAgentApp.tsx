@@ -13,6 +13,7 @@ import {
   Layout,
   List,
   Modal,
+  Progress,
   Select,
   Space,
   Spin,
@@ -44,6 +45,7 @@ import {
 import { useThemeMode } from "./theme";
 import type {
   AgentLlmStatus,
+  CodebaseIndexStreamEvent,
   PatchDirectiveInput,
   PersonalArtifactDraft,
   PersonalCodebaseConfig,
@@ -2397,6 +2399,16 @@ function CodebasePanel({
   const [directiveReplace, setDirectiveReplace] = useState("");
   const [patchText, setPatchText] = useState("");
   const [lastResult, setLastResult] = useState<PersonalToolResult>();
+  const indexAbortControllerRef = useRef<AbortController | null>(null);
+  const [indexStream, setIndexStream] = useState({
+    status: "idle" as "idle" | "started" | "running" | "done" | "error" | "cancelled",
+    phase: "scan",
+    scannedCount: 0,
+    totalCount: null as number | null,
+    estimatedTotalCount: null as number | null,
+    message: "",
+    error: "",
+  });
 
   useEffect(() => {
     if (!config) return;
@@ -2406,6 +2418,8 @@ function CodebasePanel({
     setStaticCommand(config.static_analysis_command || "");
     setTimeoutS(config.tool_timeout_s || 120);
   }, [config]);
+
+  useEffect(() => () => indexAbortControllerRef.current?.abort(), []);
 
   const saveConfig = useMutation({
     mutationFn: personalAgentApi.saveCodebaseConfig,
@@ -2426,7 +2440,6 @@ function CodebasePanel({
       },
       onError: showError
     });
-  const index = runTool(personalAgentApi.codebaseIndex);
   const search = runTool(personalAgentApi.codebaseSearch);
   const symbol = runTool(personalAgentApi.symbolLookup);
   const includeImpact = runTool(personalAgentApi.includeImpact);
@@ -2446,6 +2459,81 @@ function CodebasePanel({
     ? [{ file_path: directiveFile.trim(), find: directiveFind, replace: directiveReplace }]
     : [];
   const repoReady = Boolean(config?.repo_path || repoPath.trim());
+  const indexStreaming = indexStream.status === "started" || indexStream.status === "running";
+  const indexPercent = typeof indexStream.totalCount === "number" && indexStream.totalCount > 0
+    ? Math.min(100, Math.round((Math.min(indexStream.scannedCount, indexStream.totalCount) / indexStream.totalCount) * 100))
+    : undefined;
+  const startIndexStream = () => {
+    if (!repoReady || indexStreaming) return;
+    const controller = new AbortController();
+    let finished = false;
+    indexAbortControllerRef.current = controller;
+    setLastResult(undefined);
+    setIndexStream({
+      status: "started",
+      phase: "scan",
+      scannedCount: 0,
+      totalCount: null,
+      estimatedTotalCount: null,
+      message: "开始扫描代码仓库……",
+      error: "",
+    });
+    void personalAgentApi.codebaseIndexStream(
+      { query: indexQuery, max_files: 320 },
+      (event: CodebaseIndexStreamEvent) => {
+        setIndexStream({
+          status: event.event === "progress" ? "running" : event.event,
+          phase: event.phase || "index",
+          scannedCount: event.scanned_count ?? 0,
+          totalCount: event.total_count ?? null,
+          estimatedTotalCount: event.estimated_total_count ?? null,
+          message: event.message || "",
+          error: event.error || "",
+        });
+        if (event.event === "done" && event.result) {
+          finished = true;
+          setLastResult(event.result);
+        }
+      },
+      { signal: controller.signal },
+    ).then(() => {
+      if (!finished) return;
+      message.success("codebase_index 完成。");
+      onConfigChanged();
+    }).catch((error) => {
+      if (isAbortError(error)) {
+        setIndexStream((current) => ({
+          ...current,
+          status: "cancelled",
+          message: current.message || "代码库索引已取消。",
+          error: "",
+        }));
+        return;
+      }
+      const text = error instanceof Error ? error.message : String(error);
+      setIndexStream((current) => ({
+        ...current,
+        status: "error",
+        message: text,
+        error: text,
+      }));
+      message.error(text);
+    }).finally(() => {
+      if (indexAbortControllerRef.current === controller) {
+        indexAbortControllerRef.current = null;
+      }
+    });
+  };
+  const cancelIndexStream = () => {
+    if (!indexAbortControllerRef.current) return;
+    indexAbortControllerRef.current.abort(new DOMException("代码库索引已取消。", "AbortError"));
+    setIndexStream((current) => ({
+      ...current,
+      status: "cancelled",
+      message: "代码库索引已取消。",
+      error: "",
+    }));
+  };
   const handlePatchApply = () => {
     modal.confirm({
       title: "确认应用 Patch",
@@ -2504,10 +2592,47 @@ function CodebasePanel({
             children: (
               <Space direction="vertical" size={12} className="full-width">
                 <Input value={indexQuery} onChange={(event) => setIndexQuery(event.target.value)} placeholder="索引时的相关需求关键词，可留空" />
-                <Button type="primary" icon={<BranchesOutlined />} loading={index.isPending} disabled={!repoReady} onClick={() => index.mutate({ query: indexQuery, max_files: 320 })}>
+                <Button type="primary" icon={<BranchesOutlined />} loading={indexStreaming} disabled={!repoReady || indexStreaming} onClick={startIndexStream}>
                   扫描/更新索引
                 </Button>
-                {index.isPending ? (
+                {indexStream.status !== "idle" ? (
+                  <div className={`codebase-index-progress state-${indexStream.status}`}>
+                    <div className="codebase-index-progress-header">
+                      <div className="codebase-index-progress-meta">
+                        <Typography.Text strong>{indexStream.message || "正在处理代码库索引……"}</Typography.Text>
+                        <Typography.Text type="secondary" className="personal-small">
+                          {formatCodebaseIndexProgress(indexStream)}
+                        </Typography.Text>
+                      </div>
+                      {indexStreaming ? <Button size="small" onClick={cancelIndexStream}>取消</Button> : null}
+                    </div>
+                    {indexPercent !== undefined ? (
+                      <Progress
+                        percent={indexPercent}
+                        size="small"
+                        status={
+                          indexStream.status === "done"
+                            ? "success"
+                            : indexStream.status === "error"
+                              ? "exception"
+                              : indexStream.status === "cancelled"
+                                ? "normal"
+                                : "active"
+                        }
+                      />
+                    ) : (
+                      <div className="codebase-indeterminate-progress" aria-hidden="true">
+                        <span />
+                      </div>
+                    )}
+                    {indexStream.error ? (
+                      <Typography.Text type="danger" className="personal-small">
+                        {indexStream.error}
+                      </Typography.Text>
+                    ) : null}
+                  </div>
+                ) : null}
+                {false ? (
                   <Typography.Text type="secondary" className="personal-small">
                     正在扫描代码库……大型项目可能需要数十秒，请耐心等待。
                   </Typography.Text>
@@ -2631,6 +2756,23 @@ function ResultBlock({ result }: { result?: PersonalToolResult }) {
       <pre className="codebase-result">{JSON.stringify(result.output, null, 2)}</pre>
     </Space>
   );
+}
+
+function formatCodebaseIndexProgress(state: {
+  phase: string;
+  scannedCount: number;
+  totalCount: number | null;
+  estimatedTotalCount: number | null;
+  status: string;
+}) {
+  if (typeof state.totalCount === "number" && state.totalCount > 0) {
+    return `${state.phase} · ${state.scannedCount}/${state.totalCount}`;
+  }
+  if (typeof state.estimatedTotalCount === "number" && state.estimatedTotalCount > 0) {
+    return `${state.phase} · 已处理 ${state.scannedCount}，预计总量 ${state.estimatedTotalCount}`;
+  }
+  if (state.status === "cancelled") return `${state.phase} · 已取消`;
+  return `${state.phase} · 已处理 ${state.scannedCount}，总量估算中`;
 }
 
 function LlmConfigPanel({

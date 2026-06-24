@@ -1,7 +1,8 @@
-import { apiDelete, apiGet, apiPost, apiPut, apiStream, apiUpload } from "../api/client";
+import { ApiError, apiDelete, apiGet, apiPost, apiPut, apiStream, apiUpload } from "../api/client";
 import type {
   AgentLlmStatus,
   CodebaseIndexInput,
+  CodebaseIndexStreamEvent,
   CodebaseSearchInput,
   CallGraphInput,
   ImpactAnalyzeInput,
@@ -134,6 +135,28 @@ export const personalAgentApi = {
   codebaseConfig: () => apiGet<PersonalCodebaseConfig>("/api/personal/codebase/config"),
   saveCodebaseConfig: (body: PersonalCodebaseConfigInput) => apiPut<PersonalCodebaseConfigInput, PersonalCodebaseConfig>("/api/personal/codebase/config", body),
   codebaseIndex: (body: CodebaseIndexInput) => apiPost<CodebaseIndexInput, PersonalToolResult>("/api/personal/codebase/index", body),
+  codebaseIndexStream: async (
+    body: CodebaseIndexInput,
+    onEvent: (event: CodebaseIndexStreamEvent) => void,
+    init?: { signal?: AbortSignal },
+  ) => {
+    let terminalError: Error | null = null;
+    await apiStream(
+      "/api/personal/codebase/index/stream",
+      body,
+      (event) => {
+        const typedEvent = event as CodebaseIndexStreamEvent;
+        onEvent(typedEvent);
+        if (typedEvent.event === "error") {
+          terminalError = new ApiError(500, typedEvent.error || typedEvent.message || "代码库索引失败");
+        } else if (typedEvent.event === "cancelled") {
+          terminalError = new DOMException(typedEvent.message || "代码库索引已取消", "AbortError");
+        }
+      },
+      { ...init, timeoutMs: 0 },
+    );
+    if (terminalError) throw terminalError;
+  },
   codebaseSearch: (body: CodebaseSearchInput) => apiPost<CodebaseSearchInput, PersonalToolResult>("/api/personal/codebase/search", body),
   symbolLookup: (body: SymbolLookupInput) => apiPost<SymbolLookupInput, PersonalToolResult>("/api/personal/codebase/symbols", body),
   includeImpact: (body: IncludeImpactInput) => apiPost<IncludeImpactInput, PersonalToolResult>("/api/personal/codebase/include-impact", body),

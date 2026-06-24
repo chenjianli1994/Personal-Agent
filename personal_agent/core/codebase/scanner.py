@@ -3,13 +3,25 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .file_text import read_code_text
 from .schemas import CODE_EXTENSIONS, SKIP_DIRS, TEST_HINTS, ScannedCodeFile
 
 
-def scan_code_repository(repo_path: Path, *, max_files: int = 160, skip_dirs: list[str] | None = None, batch_size: int = 0) -> dict[str, Any]:
+class CodebaseIndexCancelled(RuntimeError):
+    pass
+
+
+def scan_code_repository(
+    repo_path: Path,
+    *,
+    max_files: int = 160,
+    skip_dirs: list[str] | None = None,
+    batch_size: int = 0,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
     repo = repo_path.resolve()
     files: list[ScannedCodeFile] = []
     skipped_after_limit = 0
@@ -24,6 +36,7 @@ def scan_code_repository(repo_path: Path, *, max_files: int = 160, skip_dirs: li
         return {"files": [], "skipped_after_limit": 0, "skipped_by_dir": 0, "limitations": [f"code repository does not exist: {repo}"]}
 
     for path in sorted(repo.rglob("*")):
+        _raise_if_cancelled(cancel_check)
         if _is_skipped(repo, path, effective_skip_dirs):
             if path.is_file():
                 skipped_by_dir += 1
@@ -52,6 +65,15 @@ def scan_code_repository(repo_path: Path, *, max_files: int = 160, skip_dirs: li
                 text=text,
             )
         )
+        if _should_report_scan_progress(len(files)):
+            _emit_progress(
+                progress_callback,
+                phase="scan",
+                scanned_count=len(files),
+                total_count=None,
+                estimated_total_count=None,
+                message=f"正在扫描代码文件：{rel}",
+            )
     if skipped_after_limit:
         limitations.append(f"scan capped before all files were indexed: skipped_after_limit={skipped_after_limit}")
     if skipped_by_dir:
@@ -70,6 +92,42 @@ def scan_code_repository(repo_path: Path, *, max_files: int = 160, skip_dirs: li
         "batch_count": _batch_count(len(files), batch_size),
         "limitations": limitations,
     }
+
+
+def _raise_if_cancelled(cancel_check: Callable[[], bool] | None) -> None:
+    if cancel_check and cancel_check():
+        raise CodebaseIndexCancelled("代码库索引已取消。")
+
+
+def _should_report_scan_progress(scanned_count: int) -> bool:
+    if scanned_count <= 3:
+        return True
+    if scanned_count <= 20:
+        return scanned_count % 5 == 0
+    return scanned_count % 10 == 0
+
+
+def _emit_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    *,
+    phase: str,
+    scanned_count: int,
+    total_count: int | None,
+    estimated_total_count: int | None,
+    message: str,
+) -> None:
+    if not progress_callback:
+        return
+    progress_callback(
+        {
+            "status": "running",
+            "phase": phase,
+            "scanned_count": scanned_count,
+            "total_count": total_count,
+            "estimated_total_count": estimated_total_count,
+            "message": message,
+        }
+    )
 
 
 def _is_skipped(root: Path, path: Path, skip_dirs: set[str]) -> bool:

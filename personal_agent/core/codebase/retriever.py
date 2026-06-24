@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .file_text import CODE_FILE_RELEVANCE_CHARS, read_code_text
 from .index_store import (
@@ -27,8 +28,19 @@ def build_codebase_index(
     max_files: int = 160,
     skip_dirs: list[str] | None = None,
     batch_size: int = 0,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    index = build_and_store_index(db_path, project_id, repo_path=repo_path, max_files=max_files, skip_dirs=skip_dirs, batch_size=batch_size)
+    index = build_and_store_index(
+        db_path,
+        project_id,
+        repo_path=repo_path,
+        max_files=max_files,
+        skip_dirs=skip_dirs,
+        batch_size=batch_size,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
     if not index.get("exists"):
         return _missing_index(project_id, index.get("limitations", ["code repository is unavailable"])[0], index.get("code_repo_path", ""))
     repo_id = int(index["repository_id"])
@@ -471,6 +483,10 @@ def _preview_is_current(repo_root: str, file_row: dict[str, Any]) -> bool:
     path = Path(repo_root) / str(file_row.get("path") or "")
     if not path.exists() or not path.is_file():
         return False
+    current_hash = _file_sha256(path)
+    stored_hash = str(file_row.get("hash") or "")
+    if current_hash and stored_hash:
+        return current_hash == stored_hash
     return _last_modified(path) == str(file_row.get("last_modified") or "")
 
 
@@ -478,6 +494,10 @@ def _last_modified(path: Path) -> str:
     from datetime import datetime
 
     return datetime.utcfromtimestamp(path.stat().st_mtime).replace(microsecond=0).isoformat() + "Z"
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _files_containing_type(db_path: Path, repository_id: int, files: list[dict[str, Any]], type_name: str, limit: int) -> list[str]:
