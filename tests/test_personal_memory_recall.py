@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
+import pytest
 
 from personal_agent.app import create_personal_app
 from personal_agent.content_guard import FORBIDDEN_PERSONAL_TERMS
@@ -945,6 +946,48 @@ def test_learning_reflection_gate_skips_chitchat_but_not_material_signals() -> N
     assert should_run_learning_reflector({"prompt": "谢谢"}, {"intent": "generate_document"}) is False
 
 
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("这个地方看起来有点问题，以后尽量避免出现", True),
+        ("这个写法不太合适，后面注意", True),
+        ("类似情况最好规避一下", True),
+        ("我不希望以后用这种固定模板", True),
+        ("后续章节写进报告", False),
+        ("后面这段帮我分析", False),
+        ("下次会议议程整理一下", False),
+        ("后续先把这个问题记一下", False),
+        ("下次我们继续这个任务", False),
+        ("帮我分析一下这里为什么有问题", False),
+    ],
+)
+def test_runtime_and_gate_keep_learning_signal_decisions_in_sync(prompt: str, expected: bool) -> None:
+    gate = learning_reflection_gate({"prompt": prompt})
+
+    assert (gate["skip"] is False) is expected
+    assert should_run_learning_reflector({"prompt": prompt}, {"intent": "answer_only"}) is expected
+
+
+def test_learning_reflection_gate_returns_structured_signal_metadata() -> None:
+    gate = learning_reflection_gate({"prompt": "类似情况最好规避一下"})
+
+    assert gate["skip"] is False
+    assert gate["reason"] == "preference_with_analogous_scope"
+    assert gate["signal_reason"] == "preference_with_analogous_scope"
+    assert gate["signal_categories"] == ["preference", "analogous_scope"]
+    assert "最好规避" in gate["matched_terms"]
+    assert "类似情况" in gate["matched_terms"]
+
+
+def test_learning_reflection_gate_marks_approval_review_signal() -> None:
+    gate = learning_reflection_gate({"prompt": "批准这条经验"})
+
+    assert gate["skip"] is False
+    assert gate["reason"] == "approval_review_signal"
+    assert gate["signal_reason"] == "approval_review_signal"
+    assert gate["signal_categories"] == ["approval_review"]
+
+
 def test_chitchat_turn_skips_learning_reflector_and_does_not_create_candidate(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     calls: list[str] = []
@@ -1022,6 +1065,57 @@ def test_explicit_correction_still_creates_candidate_and_uses_short_hint(tmp_pat
     assert len(rows) == 1
     assert "修正意图理解" in rows[0]["lesson"]
     assert rows[0]["expected_behavior"]
+
+
+def test_explicit_negative_preference_creates_candidate_via_learning_reflector(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+
+    response = client.post("/api/personal/chat/turn", json={"content": "类似情况最好规避一下"})
+
+    assert response.status_code == 200, response.json()
+    metadata = response.json()["message"]["metadata"]["learning_reflection"]
+    assert metadata["has_learning_signal"] is True
+    assert metadata["candidate_id"]
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT lesson FROM memory_candidates ORDER BY id DESC LIMIT 1").fetchone()
+    assert row is not None
+    assert "避免" in row["lesson"] or "规避" in row["lesson"]
+
+
+def test_material_problem_followup_does_not_mark_memory_unhelpful(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    candidate_id = _create_candidate(client, "以后处理 AlphaInvestigate 时先给结论")
+    _approve_candidate(client, candidate_id)
+    item_uid = f"kb_memory_{candidate_id}"
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_chat_answer":
+            return LLMResult(
+                call_id=992,
+                provider="fake-test",
+                model="memory-chat-fixture",
+                status="ok",
+                parsed={
+                    "answer": "先给结论，再补充原因。",
+                    "used_sources": [],
+                    "memory_item_uids_used": [item_uid],
+                    "limitations": [],
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    first = client.post("/api/personal/chat/turn", json={"content": "普通问题：AlphaInvestigate 怎么处理？"})
+    assert first.status_code == 200, first.json()
+    session_uid = first.json()["session"]["session_uid"]
+
+    second = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "帮我分析一下这里为什么有问题"})
+    assert second.status_code == 200, second.json()
+    stats = _item_stats(db_path, item_uid)
+    assert stats["unhelpful_count"] == 0
 
 
 def test_duplicate_or_similar_corrections_are_rejected_without_interrupting_turn(tmp_path: Path, monkeypatch) -> None:

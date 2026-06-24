@@ -17,6 +17,7 @@ from .content_guard import assert_personal_content_clean, personal_forbidden_hit
 from .context_builder import PersonalContextBuilder
 from .dev_tasks import DevTaskOrchestrator, is_continue_prompt
 from .intent_router import PersonalIntentRouter
+from .learning_signal import compact_learning_text, detect_learning_signal
 from .input_documents import activate_input_sources
 from .knowledge_recall import billable_memory_item_uids, record_recall_feedback, safe_recall_prompt_item
 from .knowledge_learning import (
@@ -1029,34 +1030,17 @@ def _validate_learning_candidate(
 
 def should_run_learning_reflector(context: dict[str, Any], route: dict[str, Any]) -> bool:
     prompt = str(context.get("prompt") or "").strip()
-    compact = "".join(prompt.lower().split())
+    compact = compact_learning_text(prompt)
+    signal = detect_learning_signal(prompt)
     if not compact:
         return False
-    if _has_explicit_learning_signal(compact):
+    if signal.has_signal:
         return True
     if implicit_learning_events(context):
         return True
     if _is_low_value_chat(compact):
         return False
     return False
-
-
-def _has_explicit_learning_signal(compact: str) -> bool:
-    signal_terms = (
-        "以后",
-        "下次",
-        "不要固定模板",
-        "按这种方式回答",
-        "你理解错了",
-        "刚才这样更好",
-        "这个修改是对的",
-        "以后都这样",
-        "下次不要这样",
-        "批准这条经验",
-        "驳回刚才那条",
-        "记住刚才那条",
-    )
-    return any(term in compact for term in signal_terms)
 
 
 def _is_low_value_chat(compact: str) -> bool:
@@ -1120,6 +1104,9 @@ def _learning_metadata(reflection: dict[str, Any], candidate: dict[str, Any] | N
         "feedback_type": reflection.get("feedback_type", ""),
         "approval_intent": reflection.get("approval_intent", "none"),
         "confidence": reflection.get("confidence", 0.0),
+        "signal_reason": reflection.get("signal_reason", ""),
+        "signal_categories": reflection.get("signal_categories", []),
+        "matched_terms": reflection.get("matched_terms", []),
         "llm": reflection.get("llm") or {},
     }
 

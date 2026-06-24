@@ -5,6 +5,7 @@ from typing import Any
 
 from personal_agent.core import llm_gateway as llm_gateway_module
 from personal_agent.core.utils import json_dumps
+from personal_agent.learning_signal import compact_learning_text, detect_learning_signal
 
 
 FEEDBACK_TYPES = {
@@ -34,6 +35,9 @@ class PersonalLearningReflector:
             reflection = _empty_reflection()
             reflection["skip_reason"] = gate["reason"]
             reflection["implicit_learning_events"] = gate["implicit_learning_events"]
+            reflection["signal_reason"] = gate.get("signal_reason", "")
+            reflection["signal_categories"] = gate.get("signal_categories", [])
+            reflection["matched_terms"] = gate.get("matched_terms", [])
             return reflection
         gateway_class = getattr(llm_gateway_module, "PersonalLLMGateway")
         system_prompt = "\n".join(
@@ -67,6 +71,9 @@ class PersonalLearningReflector:
                     for item in (context.get("sources") or [])[:3]
                 ],
                 "implicit_learning_events": gate["implicit_learning_events"],
+                "signal_reason": gate.get("signal_reason", ""),
+                "signal_categories": gate.get("signal_categories", []),
+                "matched_terms": gate.get("matched_terms", []),
                 "required_json_schema": {
                     "has_learning_signal": False,
                     "confidence": 0.0,
@@ -92,6 +99,9 @@ class PersonalLearningReflector:
         reflection = _coerce_reflection(result.parsed)
         reflection["skip_reason"] = ""
         reflection["implicit_learning_events"] = gate["implicit_learning_events"]
+        reflection["signal_reason"] = gate.get("signal_reason", "")
+        reflection["signal_categories"] = gate.get("signal_categories", [])
+        reflection["matched_terms"] = gate.get("matched_terms", [])
         reflection["llm"] = {
             "call_id": result.call_id,
             "provider": result.provider,
@@ -104,21 +114,57 @@ class PersonalLearningReflector:
 
 def learning_reflection_gate(context: dict[str, Any]) -> dict[str, Any]:
     prompt = str(context.get("prompt") or "").strip()
-    compact = _compact(prompt)
+    compact = compact_learning_text(prompt)
+    signal = detect_learning_signal(prompt)
     events = implicit_learning_events(context)
-    if _has_non_skippable_signal(compact, events):
-        return {"skip": False, "reason": "non_skippable_signal", "implicit_learning_events": events}
+    if signal.has_signal or _has_non_skippable_signal(compact, events):
+        return {
+            "skip": False,
+            "reason": signal.reason if signal.has_signal else "implicit_learning_event",
+            "signal_reason": signal.reason,
+            "signal_categories": list(signal.categories),
+            "matched_terms": list(signal.matched_terms),
+            "implicit_learning_events": events,
+        }
     if _is_low_value_chat(compact):
-        return {"skip": True, "reason": "low_value_chat", "implicit_learning_events": events}
-    return {"skip": True, "reason": "no_learning_signal", "implicit_learning_events": events}
+        return {
+            "skip": True,
+            "reason": "low_value_chat",
+            "signal_reason": signal.reason,
+            "signal_categories": list(signal.categories),
+            "matched_terms": list(signal.matched_terms),
+            "implicit_learning_events": events,
+        }
+    return {
+        "skip": True,
+        "reason": "no_learning_signal",
+        "signal_reason": signal.reason,
+        "signal_categories": list(signal.categories),
+        "matched_terms": list(signal.matched_terms),
+        "implicit_learning_events": events,
+    }
 
 
 def implicit_learning_events(context: dict[str, Any]) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     prompt = str(context.get("prompt") or "")
-    compact = _compact(prompt)
-    if _looks_like_correction(compact):
+    signal = detect_learning_signal(prompt)
+    if "correction" in signal.categories:
         events.append({"type": "explicit_correction", "confidence": 0.95})
+    if signal.reason in {
+        "correction_with_future_scope",
+        "correction_with_preference",
+        "preference_with_future_scope",
+        "preference_with_analogous_scope",
+    }:
+        events.append(
+            {
+                "type": "explicit_negative_preference",
+                "confidence": 0.88,
+                "reason": signal.reason,
+                "categories": list(signal.categories),
+            }
+        )
 
     recent_messages = context.get("recent_messages") if isinstance(context.get("recent_messages"), list) else []
     fallback_count = 0
@@ -148,11 +194,7 @@ def implicit_learning_events(context: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _has_non_skippable_signal(compact: str, events: list[dict[str, Any]]) -> bool:
-    if events:
-        return True
-    approval_terms = ("批准", "同意", "驳回", "拒绝", "不要记", "别记", "approve", "reject")
-    correction_terms = ("错", "不对", "误解", "理解错", "纠正", "修正")
-    return any(term in compact for term in approval_terms + correction_terms)
+    return bool(events)
 
 
 def _is_low_value_chat(compact: str) -> bool:
@@ -166,14 +208,6 @@ def _is_low_value_chat(compact: str) -> bool:
     if len(compact) <= 8 and any(term in compact for term in confirmations | thanks | greetings):
         return True
     return False
-
-
-def _looks_like_correction(compact: str) -> bool:
-    return any(term in compact for term in ("你理解错", "理解错", "不对", "错了", "不是这个意思", "纠正", "应该是"))
-
-
-def _compact(text: str) -> str:
-    return "".join(str(text or "").lower().split())
 
 
 def _coerce_reflection(parsed: dict[str, Any]) -> dict[str, Any]:
@@ -205,6 +239,9 @@ def _coerce_reflection(parsed: dict[str, Any]) -> dict[str, Any]:
         "anti_behavior": str(parsed.get("anti_behavior") or "").strip() if has_signal else "",
         "approval_intent": approval_intent,
         "reason": str(parsed.get("reason") or "").strip(),
+        "signal_reason": "",
+        "signal_categories": [],
+        "matched_terms": [],
     }
 
 
@@ -218,6 +255,9 @@ def _empty_reflection(*, error: str = "") -> dict[str, Any]:
         "anti_behavior": "",
         "approval_intent": "none",
         "reason": "learning reflection unavailable",
+        "signal_reason": "",
+        "signal_categories": [],
+        "matched_terms": [],
         "llm": {
             "call_id": None,
             "provider": "",

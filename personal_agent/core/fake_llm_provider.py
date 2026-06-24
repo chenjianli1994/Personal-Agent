@@ -55,6 +55,9 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
             payload = {}
         message = str(payload.get("user_message") or "")
         compact = re.sub(r"\s+", "", message).lower()
+        signal_reason = str(payload.get("signal_reason") or "")
+        signal_categories = {str(item) for item in (payload.get("signal_categories") or []) if str(item)}
+        implicit_events = payload.get("implicit_learning_events") if isinstance(payload.get("implicit_learning_events"), list) else []
 
         approve_latest = any(token in compact for token in ["批准这条经验", "批准刚才那条", "记住刚才那条", "这条以后都用", "approve latest"])
         reject_latest = any(token in compact for token in ["驳回刚才那条", "驳回这条经验", "不要记刚才", "别记刚才", "reject latest"])
@@ -69,22 +72,9 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
                 "approval_intent": "approve_latest" if approve_latest else "reject_latest",
                 "reason": "用户在对话中要求审批最近的学习候选。",
             }
-
-        signal_terms = [
-            "以后",
-            "下次",
-            "不要固定模板",
-            "按这种方式回答",
-            "你理解错了",
-            "刚才这样更好",
-            "这个修改是对的",
-            "以后都这样",
-            "下次不要这样",
-        ]
-        has_signal = any(token in compact for token in signal_terms)
-        if not has_signal:
+        event_types = {str(item.get("type") or "") for item in implicit_events if isinstance(item, dict)}
+        if not signal_reason or signal_reason == "no_learning_signal":
             if implicit_events:
-                event_types = {str(item.get("type") or "") for item in implicit_events if isinstance(item, dict)}
                 if "explicit_correction" in event_types:
                     return {
                         "has_learning_signal": True,
@@ -143,6 +133,10 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
         lesson_parts: list[str] = []
         anti_parts: list[str] = []
         feedback_type = "workflow_preference"
+        if "explicit_negative_preference" in event_types:
+            lesson_parts.append("用户指出某类表达或处理方式应避免时，应提炼为后续同类任务的质量偏好")
+            anti_parts.append("不要在后续同类任务里重复用户已明确否定的表达或处理方式")
+            feedback_type = "quality_bar" if "correction" in signal_categories else "workflow_preference"
         if "有条理" in message or "条理" in message:
             lesson_parts.append("回答应更有条理，先给明确结论，再按问题自然组织关键理由和后续动作")
             feedback_type = "style_preference"
@@ -164,6 +158,10 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
         if "按这种方式回答" in message:
             lesson_parts.append("后续同类回答应遵守用户刚确认的表达方式，但只学习原则，不机械复刻格式")
             feedback_type = "style_preference"
+        if signal_reason == "correction_with_future_scope" and not any("修正意图理解" in part for part in lesson_parts):
+            lesson_parts.append("用户指出问题并说明后续处理约束时，应先修正理解，再在同类任务中避免重复该问题")
+            anti_parts.append("不要忽略用户明确指出的问题后继续沿用原处理方式")
+            feedback_type = "correction"
         lesson = "；".join(dict.fromkeys(part for part in lesson_parts if part)) or "后续同类对话应遵守用户本轮提出的长期偏好、纠错意见或工作方式要求"
         anti_behavior = "；".join(dict.fromkeys(part for part in anti_parts if part))
         return {
