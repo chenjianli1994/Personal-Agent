@@ -14,6 +14,7 @@ import {
   List,
   Modal,
   Progress,
+  Popconfirm,
   Select,
   Space,
   Spin,
@@ -30,6 +31,7 @@ import { personalAgentApi } from "./api";
 import { ChatPanel } from "./ChatPanel";
 import type { ComposerAttachment, LocalMessage } from "./ChatPanel";
 import { DiffView } from "./DiffView";
+import { MarkdownMessage } from "./MarkdownMessage";
 import {
   ACCEPTED_UPLOAD_ACCEPT,
   ACCEPTED_UPLOAD_SET,
@@ -1314,6 +1316,13 @@ function ArtifactDraftsPanel({
     },
     onError: showError
   });
+  const openDraftFile = useMutation({
+    mutationFn: (draftUid: string) => personalAgentApi.openDraft(draftUid, {}),
+    onSuccess: (result) => {
+      message.success(`已打开 ${result.file_name}。`);
+    },
+    onError: showError
+  });
   const regenerateDraft = useMutation({
     mutationFn: (draft: PersonalArtifactDraft) => {
       const prompt = `重新生成${documentLabel(draft.document_type)}：${draft.title}`;
@@ -1356,6 +1365,7 @@ function ArtifactDraftsPanel({
   const compareRevision = draftDetail?.revisions?.find((item) => item.revision_index === compareRevisionIndex);
   const compareText = draftDetail && compareRevision ? buildLineDiff(compareRevision.content, draftDetail.content || "") : "";
   const previewIsDiff = draftDetail ? isDiffDraft(draftDetail) : false;
+  const qualityFailures = draftDetail ? qualityFailureSummary(draftDetail) : [];
 
   return (
     <div className="artifact-panel">
@@ -1419,8 +1429,8 @@ function ArtifactDraftsPanel({
                       onChange={(value) => onFilterModeChange(value)}
                       options={[
                         { value: "all", label: "全部" },
-                        { value: "session", label: "当前 session", disabled: !selectedSessionUid },
-                        { value: "task", label: "当前 task", disabled: !currentTask?.task_uid },
+                        { value: "session", label: "当前会话", disabled: !selectedSessionUid },
+                        { value: "task", label: "当前任务", disabled: !currentTask?.task_uid },
                       ]}
                     />
                     <Typography.Text type="secondary" className="personal-small">
@@ -1443,18 +1453,20 @@ function ArtifactDraftsPanel({
                           setReviewTab("preview");
                         }}
                       >
-                        <div className="artifact-title-picker">
-                          <div className="artifact-draft-title-block">
-                            <Typography.Text strong ellipsis title={item.title}>{item.title}</Typography.Text>
-                            <Space size={4} wrap>
-                              {item.task_uid ? <Tag>任务 {shortId(item.task_uid)}</Tag> : null}
-                              <Tag>{documentLabel(item.document_type)}</Tag>
-                            </Space>
-                          </div>
-                          <Space size={4} wrap={false}>
-                            <Tag>v{item.current_revision}</Tag>
-                            {item.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
+                        <div className="artifact-draft-card">
+                          <div className="artifact-draft-card-header">
+                            <Typography.Text strong ellipsis title={item.title}>
+                              {item.title}
+                            </Typography.Text>
                             {item.is_active ? <Tag color="green">当前</Tag> : null}
+                          </div>
+                          <Space size={4} wrap className="artifact-draft-meta">
+                            <Tag>{documentLabel(item.document_type)}</Tag>
+                            <Tag>v{item.current_revision}</Tag>
+                          </Space>
+                          <Space size={4} wrap className="artifact-draft-status">
+                            {item.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
+                            {item.lineage_stale ? <Tag color="orange">上游已更新</Tag> : null}
                           </Space>
                         </div>
                       </List.Item>
@@ -1467,54 +1479,103 @@ function ArtifactDraftsPanel({
                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择草稿查看内容" />
                   ) : (
                     <Space direction="vertical" size={10} className="full-width">
-                      <Space wrap>
-                        <Typography.Text strong>{draftDetail.title}</Typography.Text>
-                        <Tag>{documentLabel(draftDetail.document_type)}</Tag>
-                        <Tag>{draftDetail.content_format}</Tag>
-                        <Tag>当前 v{draftDetail.current_revision}</Tag>
-                        {draftDetail.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
-                        {draftDetail.is_active ? <Tag color="green">active draft</Tag> : (
-                          <Button size="small" loading={activateDraft.isPending} onClick={() => activateDraft.mutate(draftDetail.draft_uid)}>
+                      <div className="artifact-detail-header">
+                        <div className="artifact-detail-title">
+                          <Typography.Title level={5}>{draftDetail.title}</Typography.Title>
+                          <Space size={6} wrap>
+                            <Tag>{documentLabel(draftDetail.document_type)}</Tag>
+                            <Tag>v{draftDetail.current_revision}</Tag>
+                            {draftDetail.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
+                            {draftDetail.lineage_stale ? <Tag color="orange">上游已更新</Tag> : null}
+                          </Space>
+                        </div>
+                        {!draftDetail.is_active ? (
+                          <Button
+                            size="small"
+                            loading={activateDraft.isPending}
+                            onClick={() => activateDraft.mutate(draftDetail.draft_uid)}
+                          >
                             设为当前
                           </Button>
-                        )}
-                      </Space>
-                      <Space wrap>
-                        <Select
-                          className="artifact-export-select"
-                          value={exportFormat || undefined}
-                          options={exportOptions.map((item) => ({ value: item, label: item.toUpperCase() }))}
-                          onChange={setExportFormat}
-                        />
-                        <Button
-                          icon={<CloudDownloadOutlined />}
-                          loading={exportDraft.isPending}
-                          disabled={!exportFormat}
-                          onClick={() => exportDraft.mutate({ draftUid: draftDetail.draft_uid, format: exportFormat || defaultExportFormat(draftDetail) })}
+                        ) : null}
+                      </div>
+                      <div className="artifact-toolbar">
+                        <Space wrap size={8}>
+                          <span className="artifact-toolbar-label">导出格式</span>
+                          <Select
+                            className="artifact-export-select"
+                            value={exportFormat || undefined}
+                            options={exportOptions.map((item) => ({ value: item, label: item.toUpperCase() }))}
+                            onChange={setExportFormat}
+                          />
+                          <Button
+                            icon={<FileTextOutlined />}
+                            loading={openDraftFile.isPending}
+                            onClick={() => openDraftFile.mutate(draftDetail.draft_uid)}
+                          >
+                            打开
+                          </Button>
+                          <Button
+                            icon={<CloudDownloadOutlined />}
+                            loading={exportDraft.isPending}
+                            disabled={!exportFormat}
+                            onClick={() => exportDraft.mutate({ draftUid: draftDetail.draft_uid, format: exportFormat || defaultExportFormat(draftDetail) })}
+                          >
+                            下载
+                          </Button>
+                          <Button
+                            icon={<CopyOutlined />}
+                            onClick={() => {
+                              navigator.clipboard?.writeText(previewContent);
+                              message.success("内容已复制。");
+                            }}
+                          >
+                            复制
+                          </Button>
+                        </Space>
+                        <Popconfirm
+                          title="重新生成草稿"
+                          description={regenerateDraftDescription(draftDetail)}
+                          okText="重新生成"
+                          cancelText="取消"
+                          onConfirm={() => regenerateDraft.mutate(draftDetail)}
                         >
-                          下载
-                        </Button>
-                        <Button
-                          icon={<CopyOutlined />}
-                          onClick={() => {
-                            navigator.clipboard?.writeText(previewContent);
-                            message.success("内容已复制。");
-                          }}
-                        >
-                          复制
-                        </Button>
-                        <Button
-                          icon={<ReloadOutlined />}
-                          loading={regenerateDraft.isPending}
-                          onClick={() => regenerateDraft.mutate(draftDetail)}
-                        >
-                          重新生成
-                        </Button>
-                      </Space>
+                          <Button
+                            icon={<ReloadOutlined />}
+                            loading={regenerateDraft.isPending}
+                          >
+                            重新生成
+                          </Button>
+                        </Popconfirm>
+                      </div>
                       {manualDownload ? (
                         <Typography.Link href={manualDownload.url} download={manualDownload.fileName}>
                           手动下载 {manualDownload.fileName}
                         </Typography.Link>
+                      ) : null}
+                      {qualityFailures.length ? (
+                        <Alert
+                          type="error"
+                          showIcon
+                          message="质量未通过"
+                          description={(
+                            <Space direction="vertical" size={4}>
+                              {qualityFailures.map((item) => (
+                                <Typography.Text key={item}>{item}</Typography.Text>
+                              ))}
+                            </Space>
+                          )}
+                          action={(
+                            <Space>
+                              <Button size="small" onClick={() => setReviewTab("quality")}>
+                                查看质量页
+                              </Button>
+                              <Button size="small" type="primary" onClick={() => setReviewTab("revise")}>
+                                打开修订
+                              </Button>
+                            </Space>
+                          )}
+                        />
                       ) : null}
                       <Tabs
                         className="artifact-review-tabs"
@@ -1536,6 +1597,10 @@ function ArtifactDraftsPanel({
                                 ) : null}
                                 {previewIsDiff ? (
                                   <DiffView text={previewContent} className="artifact-preview-text artifact-preview-text-large diff-view" />
+                                ) : draftDetail && shouldRenderMarkdownDraft(draftDetail) ? (
+                                  <div className="artifact-preview-rendered">
+                                    <MarkdownMessage content={previewContent} />
+                                  </div>
                                 ) : (
                                   <pre className="artifact-preview-text artifact-preview-text-large">{previewContent}</pre>
                                 )}
@@ -2934,6 +2999,49 @@ function defaultExportFormat(draft: PersonalArtifactDraft) {
 function isDiffDraft(draft: PersonalArtifactDraft) {
   return draft.content_format === "diff" || ["c_code_diff", "unit_test_code_or_diff"].includes(draft.document_type);
 }
+
+function shouldRenderMarkdownDraft(draft: PersonalArtifactDraft) {
+  if (isDiffDraft(draft)) return false;
+  if (draft.content_format === "markdown") return true;
+  return [
+    "requirement_analysis_report",
+    "requirement_breakdown",
+    "functional_spec",
+    "detailed_design",
+  ].includes(draft.document_type);
+}
+
+function regenerateDraftDescription(draft: PersonalArtifactDraft) {
+  if (draft.document_type === "c_code_diff") {
+    return "将基于当前代码 Patch 草稿创建新的候选草稿，不会应用到项目文件。确认继续？";
+  }
+  return "将创建新的草稿候选版本，不会直接修改项目文件。确认继续？";
+}
+
+function qualityFailureSummary(draft: PersonalArtifactDraft): string[] {
+  if (draft.status !== "quality_failed") return [];
+
+  const generation = asRecord(draft.metadata?.generation);
+  const quality = asRecord(generation.quality);
+  if (!Object.keys(quality).length) return [];
+
+  const blocking = Array.isArray(quality.blocking_failures) ? quality.blocking_failures : [];
+  const blockingTexts = blocking
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (blockingTexts.length) return blockingTexts.slice(0, 2);
+
+  const checks = Array.isArray(quality.checks) ? quality.checks : [];
+  const failedChecks = checks
+    .map((check) => asRecord(check))
+    .filter((check) => check.passed === false)
+    .map((check) => String(check.message || check.detail || check.name || check.check || "").trim())
+    .filter(Boolean);
+  if (failedChecks.length) return failedChecks.slice(0, 2);
+
+  return ["质量检查未通过，请查看质量页。"];
+}
+
 
 function buildLineDiff(before: string, after: string) {
   const oldLines = before.split(/\r?\n/);
