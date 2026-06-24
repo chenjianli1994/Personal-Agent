@@ -47,6 +47,8 @@ import type {
   AgentLlmStatus,
   CodebaseIndexStreamEvent,
   PatchDirectiveInput,
+  PendingStateKey,
+  PendingVisualState,
   PersonalArtifactDraft,
   PersonalCodebaseConfig,
   PersonalDevTask,
@@ -76,6 +78,56 @@ type ChatTurnVariables = {
 };
 
 type TurnApplyOptions = Pick<ChatTurnVariables, "clearAttachmentsOnSuccess" | "sessionKey">;
+
+function pendingGenerateLabel(intent?: string) {
+  switch (intent) {
+    case "answer_only":
+      return "正在组织回答";
+    case "analyze_input_source":
+      return "正在分析输入材料";
+    case "generate_document":
+      return "正在生成文档草稿";
+    case "revise_draft":
+      return "正在修订当前草稿";
+    case "propose_code_patch":
+      return "正在生成代码修改候选";
+    case "run_validation":
+      return "正在准备验证执行";
+    case "learn_feedback":
+      return "正在处理学习反馈";
+    default:
+      return "正在生成回应";
+  }
+}
+
+function buildPendingState(key: PendingStateKey, intent?: string): PendingVisualState {
+  if (key === "generate") {
+    return {
+      key,
+      intent,
+      title: pendingGenerateLabel(intent),
+    };
+  }
+  if (key === "route") {
+    return { key, title: "正在理解意图…" };
+  }
+  if (key === "reflect") {
+    return { key, title: "正在沉淀经验…" };
+  }
+  return { key: "initial", title: "正在思考" };
+}
+
+function createPendingAssistantMessage(createdAt: string): LocalMessage {
+  return {
+    role: "assistant",
+    content: PENDING_MESSAGE,
+    created_at: createdAt,
+    pending: true,
+    metadata: {
+      pending_state: buildPendingState("initial"),
+    },
+  };
+}
 
 export function PersonalAgentApp() {
   const { message, modal } = App.useApp();
@@ -305,11 +357,20 @@ export function PersonalAgentApp() {
     setAttachments((items) => items.filter((item) => item.id !== id));
   };
 
-  const updatePendingAssistant = (sessionKey: string, content: string) => {
+  const updatePendingAssistant = (sessionKey: string, pendingState: PendingVisualState) => {
     setOptimisticBySession((items) => ({
       ...items,
       [sessionKey]: (items[sessionKey] ?? []).map((item) =>
-        item.pending && item.role !== "user" ? { ...item, content } : item
+        item.pending && item.role !== "user"
+          ? {
+            ...item,
+            content: pendingState.title,
+            metadata: {
+              ...(item.metadata ?? {}),
+              pending_state: pendingState,
+            },
+          }
+          : item
       ),
     }));
   };
@@ -366,15 +427,15 @@ export function PersonalAgentApp() {
           streamedSessionUid = event.session_uid;
         }
         if (event?.stage === "route") {
-          updatePendingAssistant(sessionKey, "正在理解意图…");
+          updatePendingAssistant(sessionKey, buildPendingState("route"));
           return;
         }
         if (event?.stage === "generate") {
-          updatePendingAssistant(sessionKey, "正在生成…");
+          updatePendingAssistant(sessionKey, buildPendingState("generate", typeof event.intent === "string" ? event.intent : ""));
           return;
         }
         if (event?.stage === "reflect") {
-          updatePendingAssistant(sessionKey, "正在沉淀经验…");
+          updatePendingAssistant(sessionKey, buildPendingState("reflect"));
           return;
         }
         if (event?.stage === "done") {
@@ -419,7 +480,7 @@ export function PersonalAgentApp() {
     startChatTurn({
       sessionUidOverride: task.session_uid,
       content: "继续",
-      optimisticMessages: [{ role: "assistant", content: PENDING_MESSAGE, created_at: new Date().toISOString(), pending: true }],
+      optimisticMessages: [createPendingAssistantMessage(new Date().toISOString())],
     });
   };
 
@@ -436,7 +497,7 @@ export function PersonalAgentApp() {
     startChatTurn({
       content: lastUser.content,
       sourceUids,
-      optimisticMessages: [{ role: "assistant", content: PENDING_MESSAGE, created_at: now, pending: true }],
+      optimisticMessages: [createPendingAssistantMessage(now)],
       restoreDraft: draft,
     });
   };
@@ -506,7 +567,7 @@ export function PersonalAgentApp() {
       sourceUids,
       optimisticMessages: [
         { role: "user", content, created_at: now, metadata: optimisticAttachments.length ? { attachments: optimisticAttachments } : {} },
-        { role: "assistant", content: PENDING_MESSAGE, created_at: now, pending: true }
+        createPendingAssistantMessage(now)
       ],
       restoreDraft: content,
       clearAttachmentsOnSuccess: true

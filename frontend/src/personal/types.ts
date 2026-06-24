@@ -44,6 +44,18 @@ export type PersonalMessage = {
   pending?: boolean;
 };
 
+export type PendingStateKey =
+  | "initial"
+  | "route"
+  | "generate"
+  | "reflect";
+
+export type PendingVisualState = {
+  key: PendingStateKey;
+  title: string;
+  intent?: string;
+};
+
 export type PersonalRecallProvenance = {
   uid: string;
   title: string;

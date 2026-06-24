@@ -34,6 +34,7 @@ import {
 import { useThemeMode } from "./theme";
 import type {
   AgentLlmStatus,
+  PendingVisualState,
   PersonalDevTask,
   PersonalDevTaskStage,
   PersonalMessage,
@@ -567,7 +568,11 @@ function Bubble({
           </div>
         ) : null}
         {item.pending ? (
-          <PendingIndicator startedAt={item.created_at} stage={item.content} />
+          <PendingIndicator
+            startedAt={item.created_at}
+            stage={item.content}
+            pendingState={asPendingVisualState(item.metadata?.pending_state)}
+          />
         ) : isUser ? (
           <div className="personal-bubble-content">{content}</div>
         ) : (
@@ -644,8 +649,18 @@ function Bubble({
   );
 }
 
-function PendingIndicator({ startedAt, stage }: { startedAt?: string; stage?: string }) {
+function PendingIndicator({
+  startedAt,
+  stage,
+  pendingState,
+}: {
+  startedAt?: string;
+  stage?: string;
+  pendingState?: PendingVisualState;
+}) {
   const [seconds, setSeconds] = useState(0);
+  const title = pendingState?.title || (stage && stage !== PENDING_MESSAGE ? stage : "正在思考");
+  const hint = pendingHint(pendingState, seconds);
 
   useEffect(() => {
     const base = startedAt ? Date.parse(startedAt) : Date.now();
@@ -662,12 +677,54 @@ function PendingIndicator({ startedAt, stage }: { startedAt?: string; stage?: st
         <i />
         <i />
       </span>
-      <Typography.Text type="secondary" className="personal-small">
-        {stage && stage !== PENDING_MESSAGE ? stage : "正在思考"}
-        {seconds ? ` · ${seconds}s` : ""}
-      </Typography.Text>
+      <div className="pending-copy">
+        <Typography.Text className="pending-title">{title}</Typography.Text>
+        <Typography.Text type="secondary" className="personal-small pending-hint">
+          {seconds ? `${hint} · ${seconds}s` : hint}
+        </Typography.Text>
+      </div>
     </div>
   );
+}
+
+function pendingHint(state: PendingVisualState | undefined, seconds: number) {
+  if (seconds >= 45) return "仍在等待模型返回，请保持页面打开";
+  if (seconds >= 15) return "复杂任务可能需要更久";
+  if (state?.key === "route") return "正在选择合适的处理路径";
+  if (state?.key === "reflect") return "正在检查是否需要记录可复用经验";
+  if (state?.key === "generate") {
+    switch (state.intent) {
+      case "analyze_input_source":
+        return "已完成：理解意图 · 正在读取并整理材料";
+      case "generate_document":
+        return "已完成：理解意图 · 正在生成结构化草稿";
+      case "revise_draft":
+        return "已完成：理解意图 · 正在按当前反馈修订草稿";
+      case "propose_code_patch":
+        return "已完成：理解意图 · 正在组织代码修改方案";
+      case "run_validation":
+        return "已完成：理解意图 · 正在准备验证步骤";
+      case "learn_feedback":
+        return "已完成：理解意图 · 正在整理可复用经验";
+      case "answer_only":
+      default:
+        return "已完成：理解意图 · 等待模型返回";
+    }
+  }
+  return "已完成：理解意图 · 等待模型返回";
+}
+
+function asPendingVisualState(value: unknown): PendingVisualState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const key = typeof (value as Record<string, unknown>).key === "string" ? String((value as Record<string, unknown>).key) : "";
+  const title = typeof (value as Record<string, unknown>).title === "string" ? String((value as Record<string, unknown>).title) : "";
+  const intent = typeof (value as Record<string, unknown>).intent === "string" ? String((value as Record<string, unknown>).intent) : undefined;
+  if (!title || !["initial", "route", "generate", "reflect"].includes(key)) return undefined;
+  return {
+    key: key as PendingVisualState["key"],
+    title,
+    intent,
+  };
 }
 
 function MessageDiagnostics({
