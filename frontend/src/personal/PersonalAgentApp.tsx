@@ -112,6 +112,7 @@ export function PersonalAgentApp() {
   const llmStatusQuery = useQuery({ queryKey: ["personal-llm-status"], queryFn: personalAgentApi.llmStatus, retry: false, refetchInterval: 15000 });
   const codebaseConfigQuery = useQuery({ queryKey: ["personal-codebase-config"], queryFn: personalAgentApi.codebaseConfig, retry: false });
   const sessionsQuery = useQuery({ queryKey: ["personal-sessions"], queryFn: personalAgentApi.sessions, retry: false, refetchInterval: 10000 });
+  const inboxBadgeQuery = useQuery({ queryKey: ["personal-inbox"], queryFn: personalAgentApi.inbox, retry: false, refetchInterval: 30000 });
   const selectedSessionQuery = useQuery({
     queryKey: ["personal-session", selectedSessionUid],
     queryFn: () => personalAgentApi.session(selectedSessionUid!),
@@ -249,6 +250,9 @@ export function PersonalAgentApp() {
   const sessions = sessionsQuery.data ?? [];
   const selectedSession = selectedSessionQuery.data ?? sessions.find((session) => session.session_uid === selectedSessionUid);
   const currentTask = currentTaskQuery.data as PersonalDevTask | undefined;
+  const inboxBadge = inboxBadgeQuery.data ?? [];
+  const learningBadgeCount = inboxBadge.filter((item) => item.kind === "learning_candidate" && item.status === "candidate").length;
+  const skillsBadgeCount = inboxBadge.filter((item) => item.kind === "skill_update_candidate" && item.status === "candidate").length;
   const activeSessionKey = selectedSessionUid ?? NEW_SESSION_KEY;
   const optimistic = optimisticBySession[activeSessionKey] ?? [];
   const localError = localErrorBySession[activeSessionKey] ?? "";
@@ -313,19 +317,22 @@ export function PersonalAgentApp() {
     sourceUids = [],
     optimisticMessages,
     restoreDraft,
-    clearAttachmentsOnSuccess = false
+    clearAttachmentsOnSuccess = false,
+    sessionUidOverride,
   }: {
     content: string;
     sourceUids?: string[];
     optimisticMessages?: LocalMessage[];
     restoreDraft?: string;
     clearAttachmentsOnSuccess?: boolean;
+    sessionUidOverride?: string | null;
   }) => {
-    const sessionKey = selectedSessionUid ?? NEW_SESSION_KEY;
+    const targetSessionUid = sessionUidOverride ?? selectedSessionUid;
+    const sessionKey = targetSessionUid ?? NEW_SESSION_KEY;
     if (pendingChatSessionKey || attachmentsUploading) return false;
     clearTypewriterAnimation();
     const controller = new AbortController();
-    const body = { session_uid: selectedSessionUid, content, source_uids: sourceUids };
+    const body = { session_uid: targetSessionUid, content, source_uids: sourceUids };
     chatAbortControllerRef.current = controller;
     setPendingChatSessionKey(sessionKey);
     setLocalErrorBySession((items) => omitKey(items, sessionKey));
@@ -402,6 +409,16 @@ export function PersonalAgentApp() {
   const cancelChatTurn = () => {
     if (!pendingChatSessionKey) return;
     chatAbortControllerRef.current?.abort();
+  };
+
+  const continueDevTaskFromPanel = (task: PersonalDevTask) => {
+    if (pendingChatSessionKey || attachmentsUploading) return;
+    setSelectedSessionUid(task.session_uid);
+    startChatTurn({
+      sessionUidOverride: task.session_uid,
+      content: "继续",
+      optimisticMessages: [{ role: "assistant", content: PENDING_MESSAGE, created_at: new Date().toISOString(), pending: true }],
+    });
   };
 
   const regenerate = () => {
@@ -504,7 +521,6 @@ export function PersonalAgentApp() {
   if (error) {
     return <Alert type="error" message="个人 Agent 启动失败" description={String(error)} />;
   }
-
   return (
     <Layout className="personal-agent-shell">
       <Layout.Sider width={300} theme={mode} className="personal-agent-sidebar">
@@ -588,6 +604,8 @@ export function PersonalAgentApp() {
           onOpenLearning={() => setLearningOpen(true)}
           onOpenCodebase={() => setCodebaseOpen(true)}
           onOpenSkills={() => setSkillsOpen(true)}
+          learningBadgeCount={learningBadgeCount}
+          skillsBadgeCount={skillsBadgeCount}
           typewriterKey={typewriterKey}
           animationVersion={animationVersion}
         />
@@ -618,6 +636,7 @@ export function PersonalAgentApp() {
         <DevTasksPanel
           selectedSessionUid={selectedSessionUid}
           currentTaskUid={currentTask?.task_uid}
+          onContinueTask={continueDevTaskFromPanel}
           onOpenDrafts={(draftUid) => {
             setDraftToOpenUid(draftUid);
             setDraftPanelTab("current");
@@ -692,9 +711,16 @@ function Sidebar({
 }) {
   const [bulkMode, setBulkMode] = useState(false);
   const [checkedSessionUids, setCheckedSessionUids] = useState<string[]>([]);
+  const [sessionSearch, setSessionSearch] = useState("");
   const checkedSet = new Set(checkedSessionUids);
   const allChecked = sessions.length > 0 && checkedSessionUids.length === sessions.length;
   const partlyChecked = checkedSessionUids.length > 0 && checkedSessionUids.length < sessions.length;
+  const searchValue = sessionSearch.trim().toLowerCase();
+  const filteredSessions = searchValue
+    ? sessions.filter((session) =>
+        (session.title || "").toLowerCase().includes(searchValue) ||
+        session.session_uid.toLowerCase().includes(searchValue))
+    : sessions;
   const exitBulkMode = () => {
     setBulkMode(false);
     setCheckedSessionUids([]);
@@ -714,6 +740,13 @@ function Sidebar({
       <Button type="primary" icon={<ThunderboltOutlined />} block onClick={onNew}>
         新会话
       </Button>
+      <Input.Search
+        allowClear
+        placeholder="搜索会话"
+        value={sessionSearch}
+        onChange={(event) => setSessionSearch(event.target.value)}
+        onSearch={setSessionSearch}
+      />
       <div className="session-bulk-toolbar">
         {bulkMode ? (
           <>
@@ -751,8 +784,8 @@ function Sidebar({
       </div>
       <List
         className="personal-task-list"
-        dataSource={sessions}
-        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有会话" /> }}
+        dataSource={filteredSessions}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={sessionSearch.trim() ? "无匹配会话" : "还没有会话"} /> }}
         renderItem={(item) => (
           <List.Item
             className={`personal-task-item ${item.session_uid === selectedSessionUid ? "active" : ""} ${bulkMode ? "bulk-mode" : ""}`}
@@ -1095,6 +1128,7 @@ function ArtifactDraftsPanel({
   const [selectedRevisionIndex, setSelectedRevisionIndex] = useState<number>();
   const [exportFormat, setExportFormat] = useState("");
   const [compareRevisionIndex, setCompareRevisionIndex] = useState<number>();
+  const [manualDownload, setManualDownload] = useState<{ url: string; fileName: string } | null>(null);
   const draftTaskUid = filterMode === "task" ? currentTask?.task_uid || "" : "";
   const draftSessionUid = filterMode === "session" ? selectedSessionUid || "" : "";
 
@@ -1129,6 +1163,7 @@ function ArtifactDraftsPanel({
       setReviewTab("preview");
       setSelectedRevisionIndex(undefined);
       setCompareRevisionIndex(undefined);
+      setManualDownload(null);
     }
   }, [openDraftUid]);
 
@@ -1144,6 +1179,7 @@ function ArtifactDraftsPanel({
       setSelectedRevisionIndex(undefined);
       setCompareRevisionIndex(undefined);
       setExportFormat(defaultExportFormat(draftDetail));
+      setManualDownload(null);
     }
   }, [draftDetail?.draft_uid, draftDetail?.current_revision, draftDetail?.content]);
 
@@ -1184,6 +1220,7 @@ function ArtifactDraftsPanel({
     onSuccess: (draft) => {
       setRevisionFeedback("");
       refreshDrafts(draft);
+      setReviewTab("versions");
       message.success(`已根据修订意见生成 v${draft.current_revision}。`);
     },
     onError: showError
@@ -1200,8 +1237,17 @@ function ArtifactDraftsPanel({
     mutationFn: ({ draftUid, format }: { draftUid: string; format: string }) =>
       personalAgentApi.exportDraft(draftUid, { format }),
     onSuccess: (result) => {
+      const url = personalAgentApi.draftDownloadUrl(result.draft_uid, result.export_format);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = result.file_name;
+      anchor.rel = "noopener noreferrer";
+      anchor.style.display = "none";
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      setManualDownload({ url, fileName: result.file_name });
       message.success(`已导出 ${result.file_name}。`);
-      window.open(personalAgentApi.draftDownloadUrl(result.draft_uid, result.export_format), "_blank", "noopener,noreferrer");
     },
     onError: showError
   });
@@ -1402,6 +1448,11 @@ function ArtifactDraftsPanel({
                           重新生成
                         </Button>
                       </Space>
+                      {manualDownload ? (
+                        <Typography.Link href={manualDownload.url} download={manualDownload.fileName}>
+                          手动下载 {manualDownload.fileName}
+                        </Typography.Link>
+                      ) : null}
                       <Tabs
                         className="artifact-review-tabs"
                         activeKey={reviewTab}
@@ -1420,23 +1471,6 @@ function ArtifactDraftsPanel({
                                     action={<Button size="small" onClick={() => setSelectedRevisionIndex(undefined)}>回到当前版本</Button>}
                                   />
                                 ) : null}
-                                <div className="artifact-inline-revise">
-                                  <Input.TextArea
-                                    value={revisionFeedback}
-                                    onChange={(event) => setRevisionFeedback(event.target.value)}
-                                    rows={3}
-                                    placeholder="输入方向性修改意见，例如：整体更像功能规范，减少实现细节，补充边界条件和验收标准。"
-                                  />
-                                  <Button
-                                    type="primary"
-                                    icon={<CheckCircleOutlined />}
-                                    loading={reviseDraftNatural.isPending}
-                                    disabled={!revisionFeedback.trim()}
-                                    onClick={() => reviseDraftNatural.mutate({ draftUid: draftDetail.draft_uid, feedback: revisionFeedback.trim() })}
-                                  >
-                                    按方向修订
-                                  </Button>
-                                </div>
                                 {previewIsDiff ? (
                                   <DiffView text={previewContent} className="artifact-preview-text artifact-preview-text-large diff-view" />
                                 ) : (
@@ -1563,7 +1597,7 @@ function ArtifactDraftsPanel({
 }
 
 function KnowledgePanel() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [selectedSourceUid, setSelectedSourceUid] = useState("");
@@ -1601,6 +1635,16 @@ function KnowledgePanel() {
     onError: showError
   });
   const visibleItems = hits.length ? hits : items;
+  const handleDeprecate = (item: PersonalKnowledgeItem) => {
+    modal.confirm({
+      title: "废弃知识条目",
+      content: "确定废弃这条知识条目吗？废弃后不再纳入知识召回。",
+      okText: "废弃",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => deprecate.mutate(item.id),
+    });
+  };
 
   return (
     <Space direction="vertical" size={12} className="full-width">
@@ -1622,6 +1666,11 @@ function KnowledgePanel() {
           导入
         </Button>
       </Space.Compact>
+      {importSource.isPending ? (
+        <Typography.Text type="secondary" className="personal-small">
+          正在导入知识条目，请稍候。
+        </Typography.Text>
+      ) : null}
       <Input.Search
         value={query}
         onChange={(event) => setQuery(event.target.value)}
@@ -1638,7 +1687,7 @@ function KnowledgePanel() {
           <List.Item
             actions={[
               item.status === "deprecated" ? <Tag key="deprecated">已废弃</Tag> : (
-                <Button key="deprecate" size="small" danger loading={deprecate.isPending} onClick={() => deprecate.mutate(item.id)}>
+                <Button key="deprecate" size="small" danger loading={deprecate.isPending} onClick={() => handleDeprecate(item)}>
                   废弃
                 </Button>
               )
@@ -1662,7 +1711,7 @@ function KnowledgePanel() {
 }
 
 function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: string }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [feedback, setFeedback] = useState("");
@@ -1718,6 +1767,17 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
     onError: showError
   });
 
+  const handleReject = (item: PersonalInboxItem) => {
+    modal.confirm({
+      title: "拒绝学习经验",
+      content: "确定拒绝这条经验吗？拒绝后该候选将不再出现在待审批列表中。",
+      okText: "拒绝",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => reject.mutate(item.id),
+    });
+  };
+
   return (
     <Space direction="vertical" size={12} className="full-width">
       <div className="learning-summary">
@@ -1766,7 +1826,7 @@ function ReadableLearningPanel({ selectedSessionUid }: { selectedSessionUid?: st
                 </Button>
               ) : null,
               item.kind === "learning_candidate" && item.status === "candidate" ? (
-                <Button key="reject" size="small" danger loading={reject.isPending} onClick={() => reject.mutate(item.id)}>
+                <Button key="reject" size="small" danger loading={reject.isPending} onClick={() => handleReject(item)}>
                   拒绝
                 </Button>
               ) : null,
@@ -2209,10 +2269,12 @@ function SkillsPanel() {
 function DevTasksPanel({
   selectedSessionUid,
   currentTaskUid,
+  onContinueTask,
   onOpenDrafts
 }: {
   selectedSessionUid?: string;
   currentTaskUid?: string;
+  onContinueTask?: (task: PersonalDevTask) => void;
   onOpenDrafts: (draftUid?: string) => void;
 }) {
   const [scope, setScope] = useState<"session" | "all">(selectedSessionUid ? "session" : "all");
@@ -2278,6 +2340,23 @@ function DevTasksPanel({
                     </Tag>
                   ))}
                 </Space>
+                {task.status === "blocked" ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="任务已阻塞"
+                    description={task.blocked_reason || "任务当前无法继续推进。"}
+                  />
+                ) : task.status !== "completed" && task.status !== "archived" ? (
+                  <Button
+                    size="small"
+                    type="primary"
+                    icon={<PlayCircleOutlined />}
+                    onClick={() => onContinueTask?.(task)}
+                  >
+                    继续推进{task.next_action?.stage ? `（${documentLabel(task.next_action.stage)}）` : ""}
+                  </Button>
+                ) : null}
               </Space>
             </List.Item>
           );
@@ -2294,7 +2373,7 @@ function CodebasePanel({
   config?: PersonalCodebaseConfig;
   onConfigChanged: () => void;
 }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const showError = useMutationErrorHandler();
   const [repoPath, setRepoPath] = useState("");
   const [buildCommand, setBuildCommand] = useState("");
@@ -2367,6 +2446,25 @@ function CodebasePanel({
     ? [{ file_path: directiveFile.trim(), find: directiveFind, replace: directiveReplace }]
     : [];
   const repoReady = Boolean(config?.repo_path || repoPath.trim());
+  const handlePatchApply = () => {
+    modal.confirm({
+      title: "确认应用 Patch",
+      content: "此操作将直接修改本地源文件，不可自动回滚。确定要应用吗？",
+      okText: "确认应用",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => applyPatchMutation.mutate({ patch_text: patchText, dry_run: false, confirmed: true, comment: "personal agent confirmed apply" }),
+    });
+  };
+  const confirmRun = (command: string, label: string, mutateFn: () => void) => {
+    modal.confirm({
+      title: `确认执行${label}`,
+      content: `将执行以下命令：\n${command}`,
+      okText: "确认执行",
+      cancelText: "取消",
+      onOk: mutateFn,
+    });
+  };
 
   return (
     <div className="codebase-panel">
@@ -2409,6 +2507,11 @@ function CodebasePanel({
                 <Button type="primary" icon={<BranchesOutlined />} loading={index.isPending} disabled={!repoReady} onClick={() => index.mutate({ query: indexQuery, max_files: 320 })}>
                   扫描/更新索引
                 </Button>
+                {index.isPending ? (
+                  <Typography.Text type="secondary" className="personal-small">
+                    正在扫描代码库……大型项目可能需要数十秒，请耐心等待。
+                  </Typography.Text>
+                ) : null}
                 <Divider />
                 <Input.Search value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onSearch={(value) => value.trim() && search.mutate({ query: value, limit: 10 })} enterButton="搜索代码" placeholder="关键词搜索代码片段和符号" loading={search.isPending} />
                 <Input.Search value={symbolName} onChange={(event) => setSymbolName(event.target.value)} onSearch={(value) => value.trim() && symbol.mutate({ name: value, limit: 20 })} enterButton="查符号" placeholder="函数/宏/类型/变量名" loading={symbol.isPending} />
@@ -2466,7 +2569,7 @@ function CodebasePanel({
                   <Button icon={<CheckCircleOutlined />} loading={applyPatchMutation.isPending} disabled={!patchText.trim()} onClick={() => applyPatchMutation.mutate({ patch_text: patchText, dry_run: true })}>
                     Dry-run 应用
                   </Button>
-                  <Button danger icon={<CheckCircleOutlined />} loading={applyPatchMutation.isPending} disabled={!patchText.trim()} onClick={() => applyPatchMutation.mutate({ patch_text: patchText, dry_run: false, confirmed: true, comment: "personal agent confirmed apply" })}>
+                  <Button danger icon={<CheckCircleOutlined />} loading={applyPatchMutation.isPending} disabled={!patchText.trim()} onClick={handlePatchApply}>
                     确认应用
                   </Button>
                 </Space>
@@ -2481,13 +2584,13 @@ function CodebasePanel({
               <Space direction="vertical" size={12} className="full-width">
                 <Alert type="info" showIcon message="只会执行配置页保存的精确白名单命令，且不会通过 shell 执行。" />
                 <Space wrap>
-                  <Button icon={<PlayCircleOutlined />} loading={build.isPending} disabled={!buildCommand.trim()} onClick={() => build.mutate({ command: buildCommand, timeout_s: timeoutS, confirmed: true })}>
+                  <Button icon={<PlayCircleOutlined />} loading={build.isPending} disabled={!buildCommand.trim()} onClick={() => confirmRun(buildCommand, "构建", () => build.mutate({ command: buildCommand, timeout_s: timeoutS, confirmed: true }))}>
                     运行构建
                   </Button>
-                  <Button icon={<PlayCircleOutlined />} loading={tests.isPending} disabled={!testCommand.trim()} onClick={() => tests.mutate({ command: testCommand, timeout_s: timeoutS, confirmed: true })}>
+                  <Button icon={<PlayCircleOutlined />} loading={tests.isPending} disabled={!testCommand.trim()} onClick={() => confirmRun(testCommand, "测试", () => tests.mutate({ command: testCommand, timeout_s: timeoutS, confirmed: true }))}>
                     运行测试
                   </Button>
-                  <Button icon={<PlayCircleOutlined />} loading={staticAnalysis.isPending} disabled={!staticCommand.trim()} onClick={() => staticAnalysis.mutate({ command: staticCommand, timeout_s: timeoutS, confirmed: true })}>
+                  <Button icon={<PlayCircleOutlined />} loading={staticAnalysis.isPending} disabled={!staticCommand.trim()} onClick={() => confirmRun(staticCommand, "静态分析", () => staticAnalysis.mutate({ command: staticCommand, timeout_s: timeoutS, confirmed: true }))}>
                     静态分析
                   </Button>
                 </Space>

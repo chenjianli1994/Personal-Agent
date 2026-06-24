@@ -1,4 +1,4 @@
-import { App, Alert, Button, Collapse, Dropdown, Empty, Input, Space, Tag, Tooltip, Typography } from "antd";
+import { App, Alert, Badge, Button, Collapse, Dropdown, Empty, Input, Space, Tag, Tooltip, Typography } from "antd";
 import {
   ApiOutlined,
   BookOutlined,
@@ -28,6 +28,7 @@ import {
   EMPTY_CHAT_DESCRIPTION,
   MAX_COMPOSER_ATTACHMENTS,
   PENDING_MESSAGE,
+  QUICK_START_PROMPTS,
   toMessageAttachments,
 } from "./constants";
 import { useThemeMode } from "./theme";
@@ -83,6 +84,8 @@ export function ChatPanel({
   onOpenLearning,
   onOpenCodebase,
   onOpenSkills,
+  learningBadgeCount,
+  skillsBadgeCount,
   typewriterKey,
   animationVersion,
 }: {
@@ -116,14 +119,19 @@ export function ChatPanel({
   onOpenLearning: () => void;
   onOpenCodebase: () => void;
   onOpenSkills: () => void;
+  learningBadgeCount?: number;
+  skillsBadgeCount?: number;
   typewriterKey?: string;
   animationVersion: number;
 }) {
   const { mode, toggle } = useThemeMode();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textAreaRef = useRef<{ focus: () => void; blur: () => void } | null>(null);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const messages = useMemo(() => [...(session?.messages ?? []), ...optimistic], [optimistic, session?.messages]);
+  const canChat = Boolean(llmStatus?.configured || llmStatus?.provider === "fake");
+  const moreBadgeCount = (learningBadgeCount ?? 0) + (skillsBadgeCount ?? 0);
   const lastAssistantIndex = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
@@ -135,6 +143,31 @@ export function ChatPanel({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages.length, session?.session_uid, currentTask?.task_uid, currentTask?.updated_at]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => textAreaRef.current?.focus(), 50);
+    return () => clearTimeout(timer);
+  }, [session?.session_uid]);
+
+  useEffect(() => {
+    const handler = (event: globalThis.KeyboardEvent) => {
+      const target = document.activeElement;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+      if (!event.ctrlKey && !event.metaKey) return;
+      const mappings: Record<string, () => void> = {
+        "1": onOpenSources,
+        "2": () => onOpenDrafts(),
+        "3": onOpenKnowledge,
+        "4": onOpenLlmSettings,
+      };
+      const action = mappings[event.key];
+      if (!action) return;
+      event.preventDefault();
+      action();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onOpenDrafts, onOpenKnowledge, onOpenLlmSettings, onOpenSources]);
 
   const handleDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
@@ -149,6 +182,13 @@ export function ChatPanel({
     }
   };
 
+  const withMenuBadge = (label: string, count?: number) => (
+    <Space size={6}>
+      <span>{label}</span>
+      <Badge count={count} size="small" />
+    </Space>
+  );
+
   const moreItems = [
     { key: "knowledge", label: "知识库", icon: <BookOutlined />, onClick: onOpenKnowledge },
     { key: "learning", label: "学习经验", icon: <BulbOutlined />, onClick: onOpenLearning },
@@ -156,6 +196,17 @@ export function ChatPanel({
     { key: "skills", label: "Skills", icon: <FileProtectOutlined />, onClick: onOpenSkills },
     { key: "llm", label: "LLM 设置", icon: <ApiOutlined />, onClick: onOpenLlmSettings },
   ];
+  const menuItems = moreItems.map((item) => ({
+    key: item.key,
+    label:
+      item.key === "learning"
+        ? withMenuBadge("学习经验", learningBadgeCount)
+        : item.key === "skills"
+          ? withMenuBadge("Skills", skillsBadgeCount)
+          : item.label,
+    icon: item.icon,
+    onClick: item.onClick,
+  }));
 
   return (
     <section
@@ -185,18 +236,15 @@ export function ChatPanel({
           </Button>
           <Dropdown
             menu={{
-              items: moreItems.map((item) => ({
-                key: item.key,
-                label: item.label,
-                icon: item.icon,
-                onClick: item.onClick,
-              })),
+              items: menuItems,
             }}
             trigger={["click"]}
           >
-            <Button aria-label="更多" icon={<MoreOutlined />}>
-              更多
-            </Button>
+            <Badge count={moreBadgeCount} size="small" offset={[-2, 2]}>
+              <Button aria-label="更多" icon={<MoreOutlined />}>
+                更多
+              </Button>
+            </Badge>
           </Dropdown>
           <Tooltip title={mode === "dark" ? "切到亮色" : "切到暗色"}>
             <Button
@@ -210,8 +258,27 @@ export function ChatPanel({
       </header>
       <div className="personal-chat-messages" ref={scrollRef}>
         {currentTask ? <CurrentTaskBar task={currentTask} onOpenDrafts={onOpenDrafts} onContinueTask={onContinueTask} /> : null}
-        {!messages.length ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={EMPTY_CHAT_DESCRIPTION} />
+        {!canChat ? (
+          <div className="llm-guide-card">
+            <Typography.Title level={4}>配置 LLM 以开始</Typography.Title>
+            <Typography.Text type="secondary">
+              PersonalAgent 需要接入大语言模型才能工作。请先配置 DeepSeek 或其他提供商的 API Key。
+            </Typography.Text>
+            <Button type="primary" icon={<ApiOutlined />} onClick={onOpenLlmSettings}>
+              打开 LLM 设置
+            </Button>
+          </div>
+        ) : !messages.length ? (
+          <Space direction="vertical" size={12} className="personal-chat-empty">
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={EMPTY_CHAT_DESCRIPTION} />
+            <Space wrap style={{ justifyContent: "center" }}>
+              {QUICK_START_PROMPTS.map((prompt) => (
+                <Tag className="clickable-tag" color="blue" key={prompt} onClick={() => setDraft(prompt)}>
+                  {prompt}
+                </Tag>
+              ))}
+            </Space>
+          </Space>
         ) : (
           messages.map((item, index) => (
             <Bubble
@@ -276,6 +343,7 @@ export function ChatPanel({
               />
             </Tooltip>
             <Input.TextArea
+              ref={textAreaRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onPaste={(event) => {
@@ -322,7 +390,7 @@ export function ChatPanel({
             event.target.value = "";
           }}
         />
-        <Tooltip title={sending ? "停止本次回复" : sendDisabled ? "其他会话正在回复" : "发送"}>
+        <Tooltip title={sending ? "停止本次回复" : !canChat ? "请先配置 LLM" : sendDisabled ? "其他会话正在回复" : "发送"}>
           <Button
             aria-label={sending ? "停止回复" : "发送消息"}
             type="primary"
@@ -330,7 +398,7 @@ export function ChatPanel({
             shape="circle"
             icon={sending ? <StopOutlined /> : <SendOutlined />}
             loading={attachmentsUploading}
-            disabled={attachmentsUploading || sendDisabled || (!sending && !draft.trim() && !attachments.length)}
+            disabled={attachmentsUploading || sendDisabled || !canChat || (!sending && !draft.trim() && !attachments.length)}
             onClick={sending ? onCancelSend : onSend}
           />
         </Tooltip>
