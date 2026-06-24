@@ -18,6 +18,9 @@ FEEDBACK_TYPES = {
 }
 
 APPROVAL_INTENTS = {"none", "approve_latest", "reject_latest"}
+LEARNABLE_FEEDBACK_TYPES = {"style_preference", "correction", "workflow_preference", "quality_bar"}
+MIN_LESSON_LEN = 8
+MAX_LESSON_LEN = 500
 
 
 class PersonalLearningReflector:
@@ -41,6 +44,10 @@ class PersonalLearningReflector:
                 "Also detect whether the user is approving or rejecting the most recent pending memory candidate.",
                 "Only learn abstract preferences, principles, corrections, and work methods. Do not mechanically copy one response format.",
                 "Do not treat ordinary questions, one-off content requests, or task instructions as long-term learning signals.",
+                "CRITICAL: Facts, domain rules, parameter relationships, and task-specific instructions from the current task, source material, or draft are not long-term learning signals.",
+                "CRITICAL: One-off requests about the current material or draft are not durable preferences, even if they are important for this turn.",
+                "CRITICAL: The active_sources field only contains source metadata and titles, not the source plain_text; do not infer long-term preferences from source titles alone.",
+                "CRITICAL: If the candidate lesson is mainly a summary or paraphrase of the current source material or active draft, set has_learning_signal=false and confidence=0.",
                 "Return strict JSON only.",
             ]
         )
@@ -99,11 +106,11 @@ def learning_reflection_gate(context: dict[str, Any]) -> dict[str, Any]:
     prompt = str(context.get("prompt") or "").strip()
     compact = _compact(prompt)
     events = implicit_learning_events(context)
-    if _has_non_skippable_signal(compact, context, events):
+    if _has_non_skippable_signal(compact, events):
         return {"skip": False, "reason": "non_skippable_signal", "implicit_learning_events": events}
     if _is_low_value_chat(compact):
         return {"skip": True, "reason": "low_value_chat", "implicit_learning_events": events}
-    return {"skip": False, "reason": "substantive_turn", "implicit_learning_events": events}
+    return {"skip": True, "reason": "no_learning_signal", "implicit_learning_events": events}
 
 
 def implicit_learning_events(context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -140,18 +147,12 @@ def implicit_learning_events(context: dict[str, Any]) -> list[dict[str, Any]]:
     return events
 
 
-def _has_non_skippable_signal(compact: str, context: dict[str, Any], events: list[dict[str, Any]]) -> bool:
+def _has_non_skippable_signal(compact: str, events: list[dict[str, Any]]) -> bool:
     if events:
         return True
     approval_terms = ("批准", "同意", "驳回", "拒绝", "不要记", "别记", "approve", "reject")
     correction_terms = ("错", "不对", "误解", "理解错", "纠正", "修正")
-    document_terms = ("生成", "草稿", "需求", "功能规范", "详细设计", "测试用例", "文档")
-    code_terms = ("代码", "patch", "diff", "测试", "运行", "函数", "文件", "commit")
-    if any(term in compact for term in approval_terms + correction_terms + document_terms + code_terms):
-        return True
-    route = context.get("intent_route") if isinstance(context.get("intent_route"), dict) else {}
-    intent = str(route.get("intent") or "")
-    return intent in {"generate_document", "revise_draft", "propose_code_patch", "run_validation", "learn_feedback"}
+    return any(term in compact for term in approval_terms + correction_terms)
 
 
 def _is_low_value_chat(compact: str) -> bool:
@@ -159,7 +160,7 @@ def _is_low_value_chat(compact: str) -> bool:
         return True
     confirmations = {"好", "好的", "可以", "行", "嗯", "嗯嗯", "ok", "okay", "收到", "明白", "了解", "是的", "对", "没问题"}
     thanks = {"谢谢", "感谢", "辛苦了", "thanks", "thankyou", "thx"}
-    greetings = {"你好", "hi", "hello", "早", "早上好", "晚上好"}
+    greetings = {"你好", "hi", "hello", "嗨", "早上好", "晚上好"}
     if compact in confirmations | thanks | greetings:
         return True
     if len(compact) <= 8 and any(term in compact for term in confirmations | thanks | greetings):
@@ -184,7 +185,14 @@ def _coerce_reflection(parsed: dict[str, Any]) -> dict[str, Any]:
         feedback_type = "none"
     lesson = str(parsed.get("candidate_lesson") or "").strip()
     confidence = _bounded_float(parsed.get("confidence"), 0.0)
-    has_signal = bool(parsed.get("has_learning_signal")) and bool(lesson) and approval_intent == "none" and confidence >= 0.55
+    has_signal = (
+        bool(parsed.get("has_learning_signal"))
+        and bool(lesson)
+        and MIN_LESSON_LEN <= len(lesson) <= MAX_LESSON_LEN
+        and approval_intent == "none"
+        and confidence >= 0.75
+        and feedback_type in LEARNABLE_FEEDBACK_TYPES
+    )
     scope = str(parsed.get("scope") or "project").strip()
     if scope not in {"session", "project", "global_personal"}:
         scope = "project"

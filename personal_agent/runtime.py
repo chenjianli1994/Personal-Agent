@@ -19,8 +19,15 @@ from .dev_tasks import DevTaskOrchestrator, is_continue_prompt
 from .intent_router import PersonalIntentRouter
 from .input_documents import activate_input_sources
 from .knowledge_recall import billable_memory_item_uids, record_recall_feedback, safe_recall_prompt_item
-from .knowledge_learning import record_personal_feedback, review_latest_session_candidate
-from .learning_reflector import PersonalLearningReflector
+from .knowledge_learning import (
+    _pending_candidate_conflict,
+    _pending_candidate_rows,
+    _pending_candidate_session_count,
+    _text_overlap_ratio,
+    record_personal_feedback,
+    review_latest_session_candidate,
+)
+from .learning_reflector import PersonalLearningReflector, implicit_learning_events
 from .policy_guard import apply_personal_policy
 from .skill_reflector import PersonalSkillReflector
 from .skill_update_candidates import (
@@ -202,7 +209,7 @@ class PersonalRuntime:
         if reflection.get("approval_intent") in {"approve_latest", "reject_latest"}:
             message = self._review_latest_learning_turn(session_uid=session_uid, prompt=prompt, reflection=reflection, route=route)
         else:
-            candidate = self._create_learning_candidate_if_needed(session_uid=session_uid, prompt=prompt, reflection=reflection)
+            candidate = self._create_learning_candidate_if_needed(session_uid=session_uid, prompt=prompt, reflection=reflection, context=context)
             if candidate:
                 reflection["candidate"] = candidate
             message = self._dispatch_turn(session_uid=session_uid, prompt=prompt, context=context, route=route, reflection=reflection)
@@ -348,8 +355,12 @@ class PersonalRuntime:
         metadata = dict(message.get("metadata") or {})
         metadata["learning_reflection"] = _learning_metadata(reflection, candidate)
         content = str(message.get("content") or "")
+        hint = "已记录为待批准经验，可在学习面板中查看。"
+        legacy_hint = "已记录为待批准经验，并会在当前会话先按它执行。"
         if candidate and "已记录为待批准经验" not in content:
-            content = content.rstrip() + "\n\n已记录为待批准经验，并会在当前会话先按它执行。"
+            content = content.rstrip() + f"\n\n{hint}"
+        elif candidate:
+            content = content.replace(legacy_hint, hint)
         assert_personal_content_clean(content, label="assistant message")
         with connect(self.db_path) as conn:
             conn.execute(
@@ -492,14 +503,23 @@ class PersonalRuntime:
     def _learn_feedback_turn(self, *, session_uid: str, prompt: str, route: dict[str, Any], reflection: dict[str, Any]) -> dict[str, Any]:
         candidate = reflection.get("candidate") if isinstance(reflection.get("candidate"), dict) else None
         if not candidate:
-            candidate = record_personal_feedback(
-                self.db_path,
-                project_id=self.project_id,
-                session_uid=session_uid,
-                feedback=prompt,
-                source="personal_intent_route",
-                add_to_regression=False,
-            )
+            try:
+                candidate = record_personal_feedback(
+                    self.db_path,
+                    project_id=self.project_id,
+                    session_uid=session_uid,
+                    feedback=prompt,
+                    source="personal_intent_route",
+                    add_to_regression=False,
+                )
+            except ValueError as exc:
+                logger.info("explicit learning feedback rejected: %s", exc)
+                return self._append_message(
+                    session_uid,
+                    "assistant",
+                    "这条反馈没有生成新的学习候选，当前对话会继续按现有规则处理。",
+                    {"context": "learning_feedback", "intent_route": _intent_metadata(route), "learning_feedback_skipped": str(exc)},
+                )
         answer = f"已记录为待批准经验候选：{candidate.get('title') or candidate.get('id')}。批准后才会沉淀为长期规则。"
         return self._append_message(session_uid, "assistant", answer, {"context": "learning_feedback", "learning_candidate": candidate, "intent_route": _intent_metadata(route)})
 
@@ -552,21 +572,43 @@ class PersonalRuntime:
             {"context": "learning_review", "learning_candidate": reviewed, "intent_route": _intent_metadata(route), "learning_reflection": _learning_metadata(reflection, reviewed)},
         )
 
-    def _create_learning_candidate_if_needed(self, *, session_uid: str, prompt: str, reflection: dict[str, Any]) -> dict[str, Any] | None:
+    def _create_learning_candidate_if_needed(
+        self,
+        *,
+        session_uid: str,
+        prompt: str,
+        reflection: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any] | None:
         if not reflection.get("has_learning_signal"):
             return None
-        return record_personal_feedback(
-            self.db_path,
-            project_id=self.project_id,
+        lesson = str(reflection.get("candidate_lesson") or "").strip()
+        valid, reason = _validate_learning_candidate(
+            lesson=lesson,
+            context=context,
             session_uid=session_uid,
-            feedback=prompt,
-            source="personal_learning_reflect",
-            corrected_behavior=str(reflection.get("candidate_lesson") or ""),
-            anti_behavior=str(reflection.get("anti_behavior") or ""),
-            feedback_type=str(reflection.get("feedback_type") or "personal_behavior_feedback"),
-            scope=str(reflection.get("scope") or "project"),
-            add_to_regression=False,
+            project_id=self.project_id,
+            db_path=self.db_path,
         )
+        if not valid:
+            logger.info("learning candidate rejected by local validator: %s", reason)
+            return None
+        try:
+            return record_personal_feedback(
+                self.db_path,
+                project_id=self.project_id,
+                session_uid=session_uid,
+                feedback=prompt,
+                source="personal_learning_reflect",
+                corrected_behavior=lesson,
+                anti_behavior=str(reflection.get("anti_behavior") or ""),
+                feedback_type=str(reflection.get("feedback_type") or "personal_behavior_feedback"),
+                scope=str(reflection.get("scope") or "project"),
+                add_to_regression=False,
+            )
+        except ValueError as exc:
+            logger.info("learning candidate rejected by record_personal_feedback: %s", exc)
+            return None
 
     def _create_skill_candidate_if_needed(self, *, session_uid: str, reflection: dict[str, Any]) -> dict[str, Any] | None:
         if not reflection.get("has_skill_update_signal"):
@@ -935,19 +977,68 @@ def _recall_provenance(
     return provenance
 
 
+def _validate_learning_candidate(
+    *,
+    lesson: str,
+    context: dict[str, Any],
+    session_uid: str,
+    project_id: int,
+    db_path: Path,
+) -> tuple[bool, str]:
+    cleaned = str(lesson or "").strip()
+    if not cleaned:
+        return False, "empty_lesson"
+
+    sources = context.get("sources") if isinstance(context.get("sources"), list) else []
+    for source in sources[:3]:
+        if not isinstance(source, dict):
+            continue
+        source_text = str(source.get("plain_text") or "").strip()
+        if source_text and _text_overlap_ratio(cleaned, source_text) > 0.6:
+            return False, "lesson_overlaps_with_active_source"
+
+    active_draft = context.get("active_draft") if isinstance(context.get("active_draft"), dict) else {}
+    draft_uid = str(active_draft.get("draft_uid") or "").strip()
+    if draft_uid:
+        try:
+            draft = get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
+        except ValueError:
+            draft = {}
+        draft_text = "\n".join(
+            part
+            for part in [
+                str(draft.get("title") or "").strip(),
+                str(draft.get("content") or "").strip(),
+            ]
+            if part
+        )
+        if draft_text and _text_overlap_ratio(cleaned, draft_text) > 0.6:
+            return False, "lesson_overlaps_with_active_draft"
+
+    pending_rows = _pending_candidate_rows(db_path, project_id=project_id, limit=50)
+    session_pending_count = _pending_candidate_session_count(pending_rows, session_uid=session_uid)
+    if session_pending_count >= 3:
+        return False, "session_candidate_limit_reached"
+    if len(pending_rows) >= 10:
+        return False, "project_candidate_limit_reached"
+    conflict = _pending_candidate_conflict(pending_rows, lesson=cleaned, session_uid=session_uid)
+    if conflict:
+        return False, conflict
+    return True, ""
+
+
 def should_run_learning_reflector(context: dict[str, Any], route: dict[str, Any]) -> bool:
-    intent = str(route.get("intent") or "")
-    if intent in {"generate_document", "revise_draft", "propose_code_patch", "run_validation", "learn_feedback", "analyze_input_source"}:
-        return True
     prompt = str(context.get("prompt") or "").strip()
     compact = "".join(prompt.lower().split())
     if not compact:
         return False
     if _has_explicit_learning_signal(compact):
         return True
+    if implicit_learning_events(context):
+        return True
     if _is_low_value_chat(compact):
         return False
-    return True
+    return False
 
 
 def _has_explicit_learning_signal(compact: str) -> bool:

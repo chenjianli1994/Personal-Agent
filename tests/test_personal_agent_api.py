@@ -286,7 +286,7 @@ def test_personal_analysis_uses_llm_intent_route_and_answer(tmp_path: Path, monk
             row["purpose"]
             for row in conn.execute("SELECT purpose FROM llm_call_logs ORDER BY id DESC LIMIT 3").fetchall()
         ]
-    assert purposes == ["personal_chat_answer", "personal_learning_reflect", "personal_intent_route"]
+    assert purposes == ["personal_chat_answer", "personal_intent_route"]
 
 
 def test_personal_chat_turn_activates_attached_sources_before_routing(tmp_path: Path, monkeypatch) -> None:

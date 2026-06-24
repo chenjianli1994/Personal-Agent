@@ -301,7 +301,7 @@ def test_document_generation_only_marks_explicitly_used_memory_helpful(tmp_path:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     source_uid = _add_active_source(client)
     first_id = _create_candidate(client, "以后生成 AlphaPrecise 功能规范时保留用户可观察行为")
-    second_id = _create_candidate(client, "以后生成 AlphaPrecise 功能规范时先列边界")
+    second_id = _create_candidate(client, "以后生成 AlphaPrecise 功能规范时单独列出验收标准和失败条件")
     _approve_candidate(client, first_id)
     _approve_candidate(client, second_id)
     first_uid = f"kb_memory_{first_id}"
@@ -550,7 +550,7 @@ def test_unhelpful_feedback_lowers_memory_ranking(tmp_path: Path, monkeypatch) -
     client, db_path, _ = _client(tmp_path, monkeypatch)
     project_id = _project_id(client)
     first_id = _create_candidate(client, "以后处理 AlphaRank 时使用旧规则")
-    second_id = _create_candidate(client, "以后处理 AlphaRank 时使用新规则")
+    second_id = _create_candidate(client, "以后处理 AlphaRank 时先说明判断依据，再给出最终建议")
     _approve_candidate(client, first_id)
     _approve_candidate(client, second_id)
     first_uid = f"kb_memory_{first_id}"
@@ -642,7 +642,7 @@ def test_correction_feedback_marks_previous_injected_memory_unhelpful(tmp_path: 
 def test_correction_feedback_only_marks_declared_used_memory_unhelpful(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     first_id = _create_candidate(client, "以后处理 AlphaCorrectionScope 时先给旧规则")
-    second_id = _create_candidate(client, "以后处理 AlphaCorrectionScope 时先给新规则")
+    second_id = _create_candidate(client, "以后处理 AlphaCorrectionScope 时先确认用户纠正点，再给出建议")
     _approve_candidate(client, first_id)
     _approve_candidate(client, second_id)
     first_uid = f"kb_memory_{first_id}"
@@ -937,12 +937,12 @@ def test_learning_reflection_gate_skips_chitchat_but_not_material_signals() -> N
     assert learning_reflection_gate({"prompt": "好的"})["skip"] is True
     assert learning_reflection_gate({"prompt": "你理解错了，Alpha 应该先确认我的纠正点"})["skip"] is False
     assert learning_reflection_gate({"prompt": "批准这条经验"})["skip"] is False
-    assert learning_reflection_gate({"prompt": "生成 Alpha 功能规范"})["skip"] is False
-    assert learning_reflection_gate({"prompt": "给这个函数写 patch"})["skip"] is False
+    assert learning_reflection_gate({"prompt": "生成 Alpha 功能规范"})["skip"] is True
+    assert learning_reflection_gate({"prompt": "给这个函数写 patch"})["skip"] is True
     assert should_run_learning_reflector({"prompt": ""}, {"intent": "answer_only"}) is False
     assert should_run_learning_reflector({"prompt": "以后都这样回答"}, {"intent": "answer_only"}) is True
     assert should_run_learning_reflector({"prompt": "谢谢"}, {"intent": "answer_only"}) is False
-    assert should_run_learning_reflector({"prompt": "谢谢"}, {"intent": "generate_document"}) is True
+    assert should_run_learning_reflector({"prompt": "谢谢"}, {"intent": "generate_document"}) is False
 
 
 def test_chitchat_turn_skips_learning_reflector_and_does_not_create_candidate(tmp_path: Path, monkeypatch) -> None:
@@ -964,7 +964,7 @@ def test_chitchat_turn_skips_learning_reflector_and_does_not_create_candidate(tm
         assert conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0] == 0
 
 
-def test_correction_and_document_generation_are_not_gated_from_learning_reflector(tmp_path: Path, monkeypatch) -> None:
+def test_correction_and_document_generation_follow_new_learning_signal_gate(tmp_path: Path, monkeypatch) -> None:
     client, db_path, _ = _client(tmp_path, monkeypatch)
     source_uid = _add_active_source(client)
     calls: list[dict[str, Any]] = []
@@ -983,4 +983,90 @@ def test_correction_and_document_generation_are_not_gated_from_learning_reflecto
     assert document.status_code == 200, document.json()
 
     assert any(item["implicit_learning_events"] and item["implicit_learning_events"][0]["type"] == "explicit_correction" for item in calls)
-    assert any("生成 AlphaGate 功能规范" in item["user_message"] for item in calls)
+    assert not any("生成 AlphaGate 功能规范" in item["user_message"] for item in calls)
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0] == 1
+
+
+def test_ordinary_business_followup_does_not_trigger_learning_reflector_or_create_candidate(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    source_uid = _add_active_source(client)
+    calls: list[str] = []
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        calls.append(purpose)
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post("/api/personal/chat/turn", json={"content": "继续分析这份资料里的异常处理边界", "source_uids": [source_uid]})
+
+    assert response.status_code == 200, response.json()
+    assert "personal_learning_reflect" not in calls
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0] == 0
+
+
+def test_explicit_correction_still_creates_candidate_and_uses_short_hint(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+
+    response = client.post("/api/personal/chat/turn", json={"content": "你理解错了，AlphaLearnable 应该先给结论，再列关键理由"})
+
+    assert response.status_code == 200, response.json()
+    message = response.json()["message"]
+    assert "已记录为待批准经验，可在学习面板中查看。" in message["content"]
+    assert "并会在当前会话先按它执行" not in message["content"]
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT lesson, expected_behavior FROM memory_candidates ORDER BY id DESC LIMIT 1").fetchall()
+    assert len(rows) == 1
+    assert "修正意图理解" in rows[0]["lesson"]
+    assert rows[0]["expected_behavior"]
+
+
+def test_duplicate_or_similar_corrections_are_rejected_without_interrupting_turn(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+
+    first = client.post("/api/personal/chat/turn", json={"content": "你理解错了，以后处理 AlphaDup 时先确认纠正点，再继续回答"})
+    session_uid = first.json()["session"]["session_uid"]
+    second = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "你理解错了，以后处理 AlphaDup 时先确认纠正点，然后再继续回答"})
+
+    assert first.status_code == 200, first.json()
+    assert second.status_code == 200, second.json()
+    with connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0]
+    assert count == 1
+
+
+def test_low_confidence_reflection_does_not_create_candidate(tmp_path: Path, monkeypatch) -> None:
+    client, db_path, _ = _client(tmp_path, monkeypatch)
+    original_complete_json = LLMBridge.complete_json
+
+    def fake_complete_json(self: Any, *, purpose: str, system_prompt: str, user_prompt: str, project_id: int | None = None, task_uid: str = "") -> Any:
+        if purpose == "personal_learning_reflect":
+            return LLMResult(
+                call_id=991,
+                provider="fake-test",
+                model="low-confidence-learning-fixture",
+                status="ok",
+                parsed={
+                    "has_learning_signal": True,
+                    "confidence": 0.6,
+                    "feedback_type": "style_preference",
+                    "scope": "project",
+                    "candidate_lesson": "以后回答 AlphaLowConfidence 时先给结论，再列关键理由",
+                    "anti_behavior": "不要直接堆砌细节",
+                    "approval_intent": "none",
+                    "reason": "低置信度测试",
+                },
+                raw_text="{}",
+            )
+        return original_complete_json(self, purpose=purpose, system_prompt=system_prompt, user_prompt=user_prompt, project_id=project_id, task_uid=task_uid)
+
+    monkeypatch.setattr(LLMBridge, "complete_json", fake_complete_json)
+
+    response = client.post("/api/personal/chat/turn", json={"content": "你理解错了，AlphaLowConfidence 应该先给结论，再列关键理由"})
+
+    assert response.status_code == 200, response.json()
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0] == 0

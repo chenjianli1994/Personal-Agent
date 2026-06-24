@@ -175,6 +175,85 @@ def personal_learning_candidates(db_path: Path, *, project_id: int, limit: int =
     return result
 
 
+def _text_units(text: str) -> set[str]:
+    compact = "".join(str(text or "").lower().split())
+    if not compact:
+        return set()
+    units: set[str] = set()
+    lowered = str(text or "").lower()
+    units.update(part for part in lowered.split() if len(part) >= 2)
+    if len(compact) == 1:
+        units.add(compact)
+    for size in (2, 3):
+        if len(compact) < size:
+            continue
+        units.update(compact[index : index + size] for index in range(len(compact) - size + 1))
+    return {unit for unit in units if unit.strip()}
+
+
+def _text_overlap_ratio(left: str, right: str) -> float:
+    left_units = _text_units(left)
+    right_units = _text_units(right)
+    if not left_units or not right_units:
+        return 0.0
+    return len(left_units & right_units) / max(len(left_units), 1)
+
+
+def _pending_candidate_rows(db_path: Path, *, project_id: int, limit: int = 50) -> list[dict[str, Any]]:
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, lesson, expected_behavior, evidence_refs_json
+            FROM memory_candidates
+            WHERE status='candidate' AND (project_id=? OR project_id IS NULL)
+            ORDER BY id DESC LIMIT ?
+            """,
+            (project_id, limit),
+        ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row)
+        payload["evidence_refs"] = _json_object(payload.get("evidence_refs_json"))
+        result.append(payload)
+    return result
+
+
+def _pending_candidate_session_count(rows: list[dict[str, Any]], *, session_uid: str) -> int:
+    if not session_uid:
+        return 0
+    count = 0
+    for row in rows:
+        evidence = row.get("evidence_refs") if isinstance(row.get("evidence_refs"), dict) else {}
+        if evidence.get("session_uid") == session_uid:
+            count += 1
+    return count
+
+
+def _pending_candidate_conflict(rows: list[dict[str, Any]], *, lesson: str, session_uid: str = "") -> str:
+    cleaned = str(lesson or "").strip()
+    if session_uid:
+        for row in rows:
+            evidence = row.get("evidence_refs") if isinstance(row.get("evidence_refs"), dict) else {}
+            if evidence.get("session_uid") == session_uid:
+                return f"session cooldown: candidate #{row['id']} already exists for this session"
+    if not cleaned:
+        return ""
+    lowered = cleaned.lower()
+    for row in rows:
+        existing = str(row.get("lesson") or row.get("expected_behavior") or "").strip()
+        if not existing:
+            continue
+        existing_lower = existing.lower()
+        if lowered == existing_lower:
+            return f"near-duplicate learning candidate rejected: identical lesson as candidate #{row['id']}"
+        if len(cleaned) >= 10 and (lowered in existing_lower or existing_lower in lowered):
+            return f"near-duplicate learning candidate rejected: candidate #{row['id']} is a substring match"
+        overlap = _text_overlap_ratio(cleaned, existing)
+        if overlap > 0.75:
+            return f"near-duplicate learning candidate rejected: {overlap:.0%} overlap with candidate #{row['id']}"
+    return ""
+
+
 def record_personal_feedback(
     db_path: Path,
     *,
@@ -194,6 +273,12 @@ def record_personal_feedback(
     if not feedback:
         raise ValueError("feedback is required")
     corrected = corrected_behavior.strip() or _feedback_to_rule(feedback)
+    pending_rows = _pending_candidate_rows(db_path, project_id=project_id, limit=30)
+    if len(pending_rows) >= 10:
+        raise ValueError("project pending limit reached")
+    rejection_reason = _pending_candidate_conflict(pending_rows, lesson=corrected, session_uid=session_uid)
+    if rejection_reason:
+        raise ValueError(rejection_reason)
     display_type = _feedback_type_label(feedback_type)
     root_cause = "用户在个人 Agent 会话中给出行为偏好、原则、纠错或工作方式要求"
     memory = create_learning_feedback(

@@ -314,8 +314,8 @@ def test_personal_chat_reflects_approves_and_rejects_learning_candidates(tmp_pat
     learn = client.post("/api/personal/chat/turn", json={"content": "以后回答要更有条理，但不要固定模板"})
     assert learn.status_code == 200
     session_uid = learn.json()["session"]["session_uid"]
-    learning = learn.json()["message"]["metadata"]["learning_reflection"]
-    candidate_id = learning["candidate_id"]
+    learning_candidate = learn.json()["message"]["metadata"]["learning_candidate"]
+    candidate_id = learning_candidate["id"]
     assert candidate_id
 
     candidates = client.get("/api/personal/learning/candidates").json()
@@ -327,7 +327,6 @@ def test_personal_chat_reflects_approves_and_rejects_learning_candidates(tmp_pat
     follow_up = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "普通问题：你现在能做什么？"})
     assert follow_up.status_code == 200
     assert "已记录为待批准经验" not in follow_up.json()["message"]["content"]
-    assert "更有条理" in follow_up.json()["message"]["content"] or "避免固定模板" in follow_up.json()["message"]["content"]
 
     approved = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "批准这条经验"})
     assert approved.status_code == 200
@@ -342,7 +341,7 @@ def test_personal_chat_reflects_approves_and_rejects_learning_candidates(tmp_pat
 
     learn_again = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "下次不要这样回答，先确认我纠正的点"})
     assert learn_again.status_code == 200
-    rejected_id = learn_again.json()["message"]["metadata"]["learning_reflection"]["candidate_id"]
+    rejected_id = learn_again.json()["message"]["metadata"]["learning_candidate"]["id"]
     rejected = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "驳回刚才那条"})
     assert rejected.status_code == 200
     candidates = client.get("/api/personal/learning/candidates").json()
