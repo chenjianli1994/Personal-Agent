@@ -348,6 +348,43 @@ def test_personal_chat_reflects_approves_and_rejects_learning_candidates(tmp_pat
     assert next(item for item in candidates if item["id"] == rejected_id)["status"] == "rejected"
 
 
+def test_learning_candidate_review_wins_when_mixed_with_new_learning_signal(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    learn = client.post("/api/personal/chat/turn", json={"content": "以后回答 AlphaMixedReview 时不要固定模板"})
+    assert learn.status_code == 200, learn.json()
+    session_uid = learn.json()["session"]["session_uid"]
+    candidate_id = int(learn.json()["message"]["metadata"]["learning_candidate"]["id"])
+
+    approved = client.post(
+        "/api/personal/chat/turn",
+        json={"session_uid": session_uid, "content": "批准这条经验，以后也按这种方式回答"},
+    )
+    assert approved.status_code == 200, approved.json()
+
+    with connect(db_path) as conn:
+        candidate_rows = conn.execute("SELECT id, status FROM memory_candidates ORDER BY id").fetchall()
+    assert [(row["id"], row["status"]) for row in candidate_rows] == [(candidate_id, "approved")]
+
+    learn_again = client.post("/api/personal/chat/turn", json={"session_uid": session_uid, "content": "以后处理 AlphaMixedReject 时先确认边界"})
+    assert learn_again.status_code == 200, learn_again.json()
+    rejected_id = int(learn_again.json()["message"]["metadata"]["learning_candidate"]["id"])
+
+    rejected = client.post(
+        "/api/personal/chat/turn",
+        json={"session_uid": session_uid, "content": "驳回刚才那条，类似情况以后不要再这样"},
+    )
+    assert rejected.status_code == 200, rejected.json()
+
+    with connect(db_path) as conn:
+        candidate_rows = conn.execute("SELECT id, status FROM memory_candidates ORDER BY id").fetchall()
+    assert [(row["id"], row["status"]) for row in candidate_rows] == [(candidate_id, "approved"), (rejected_id, "rejected")]
+
+
 def test_personal_chat_ordinary_question_does_not_create_learning_candidate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
     db_path = tmp_path / "agent.db"
