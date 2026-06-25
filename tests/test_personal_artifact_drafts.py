@@ -313,6 +313,93 @@ def test_draft_list_session_and_task_filters_take_intersection(tmp_path: Path, m
     assert [item["draft_uid"] for item in scoped.json()] == [kept["draft_uid"]]
 
 
+def test_draft_payload_includes_task_context_and_stage_candidate_metadata(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    session_uid = client.post("/api/personal/chat/turn", json={"content": "创建任务会话"}).json()["session"]["session_uid"]
+    source_uid = client.post(
+        "/api/personal/sources/text",
+        json={"title": "输入资料", "content": "需要生成需求分析和拆解。", "make_active": True},
+    ).json()["source_uid"]
+    task = client.post(
+        "/api/personal/dev-tasks/start",
+        json={"session_uid": session_uid, "prompt": "生成开发任务", "source_uids": [source_uid]},
+    ).json()
+    first_draft_uid = task["stages"][0]["draft_uid"]
+
+    second = client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "requirement_analysis_report",
+            "session_uid": session_uid,
+            "task_uid": task["task_uid"],
+            "title": "需求分析候选二",
+            "content": "# 候选二",
+            "make_active": False,
+        },
+    )
+    assert second.status_code == 200
+    second_draft = second.json()
+
+    listed = client.get("/api/personal/drafts", params={"task_uid": task["task_uid"]})
+    assert listed.status_code == 200
+    by_uid = {item["draft_uid"]: item for item in listed.json()}
+    first_draft = by_uid[first_draft_uid]
+    second_payload = by_uid[second_draft["draft_uid"]]
+
+    assert first_draft["task_display_code"] == "T1"
+    assert first_draft["task_session_display_index"] == 1
+    assert first_draft["task_status"] == task["status"]
+    assert first_draft["task_title"] == task["title"]
+    assert first_draft["task_next_action"]["action"] == "continue"
+    assert first_draft["stage_index"] == 0
+    assert first_draft["candidate_index"] == 1
+    assert first_draft["stage_candidate_count"] == 2
+    assert first_draft["is_stage_current_candidate"] is True
+
+    assert second_payload["task_display_code"] == "T1"
+    assert second_payload["candidate_index"] == 2
+    assert second_payload["stage_candidate_count"] == 2
+    assert second_payload["is_stage_current_candidate"] is False
+
+    detail = client.get(f"/api/personal/artifacts/{second_draft['draft_uid']}")
+    assert detail.status_code == 200
+    assert detail.json()["candidate_index"] == 2
+    assert detail.json()["task_display_code"] == "T1"
+    assert detail.json()["is_stage_current_candidate"] is False
+
+
+def test_unlinked_draft_payload_keeps_empty_task_context(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+
+    created = client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "functional_spec",
+            "session_uid": "session_alpha",
+            "title": "未关联草稿",
+            "content": "# 未关联草稿",
+        },
+    )
+    assert created.status_code == 200
+    draft = created.json()
+
+    listed = client.get("/api/personal/drafts", params={"session_uid": "session_alpha"})
+    assert listed.status_code == 200
+    payload = listed.json()[0]
+    assert payload["draft_uid"] == draft["draft_uid"]
+    assert payload["task_display_code"] == ""
+    assert payload["task_session_display_index"] is None
+    assert payload["candidate_index"] is None
+    assert payload["stage_candidate_count"] == 0
+    assert payload["is_stage_current_candidate"] is False
+
+
 def _client(tmp_path: Path) -> TestClient:
     db_path = tmp_path / "agent.db"
     workspace = tmp_path / "workspace"

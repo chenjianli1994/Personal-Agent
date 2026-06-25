@@ -451,7 +451,9 @@ function CurrentTaskBar({
         <Space wrap>
           <Typography.Text strong>{task.title}</Typography.Text>
           <Tag color={task.status === "blocked" ? "volcano" : task.status === "completed" ? "green" : "blue"}>{task.status}</Tag>
-          <Tag>{shortTaskId(task.task_uid)}</Tag>
+          <Tooltip title={task.task_uid}>
+            <Tag color="blue">{taskDisplayCode(task)}</Tag>
+          </Tooltip>
           {focusStage?.draft_uid ? (
             <Button type="link" size="small" className="current-task-stage-link" onClick={() => onOpenDrafts(focusStage.draft_uid)}>
               {documentLabel(focusStage.document_type)}
@@ -854,6 +856,10 @@ function validationTagColor(category: string): string {
 
 function shortTaskId(value: string): string {
   return value.length > 14 ? value.slice(-8) : value;
+}
+
+function taskDisplayCode(task?: Pick<PersonalDevTask, "display_code" | "task_uid">): string {
+  return task?.display_code || shortTaskId(task?.task_uid || "");
 }
 
 function documentLabel(value: string): string {

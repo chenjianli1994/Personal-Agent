@@ -145,6 +145,9 @@ export type PersonalDevTask = {
   blocked_reason?: string;
   last_action?: Record<string, unknown>;
   validation_summary?: Record<string, PersonalDevTaskValidationSummary>;
+  display_code?: string;
+  session_display_index?: number | null;
+  display_scope?: string;
 };
 
 export type PersonalChatTurnResult = {
@@ -246,6 +249,17 @@ export type PersonalArtifactDraft = {
   preview?: string;
   content?: string;
   revisions?: PersonalArtifactRevision[];
+  task_display_code?: string;
+  task_session_display_index?: number | null;
+  task_title?: string;
+  task_status?: string;
+  task_current_step?: string;
+  task_next_action?: PersonalDevTaskNextAction | Record<string, unknown>;
+  task_display_scope?: string;
+  stage_index?: number | null;
+  candidate_index?: number | null;
+  stage_candidate_count?: number;
+  is_stage_current_candidate?: boolean;
 };
 
 export type PersonalSkillEval = {

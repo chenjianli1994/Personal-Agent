@@ -230,6 +230,28 @@ def test_start_archives_old_active_like_task_in_same_session(tmp_path: Path, mon
     assert first_status == "archived"
 
 
+def test_dev_task_payload_includes_session_display_identity(tmp_path: Path, monkeypatch: Any) -> None:
+    client, _db_path, _ = _client(tmp_path, monkeypatch)
+    session_uid = _session(client)
+    source_uid = _source(client)
+
+    first = _start_task(client, session_uid, [source_uid])
+    second = _start_task(client, session_uid, [source_uid])
+
+    assert first["display_code"] == "T1"
+    assert first["session_display_index"] == 1
+    assert first["display_scope"] == "session"
+    assert second["display_code"] == "T2"
+    assert second["session_display_index"] == 2
+    listed = client.get("/api/personal/dev-tasks", params={"session_uid": session_uid})
+    assert listed.status_code == 200
+    by_uid = {item["task_uid"]: item for item in listed.json()}
+    assert by_uid[first["task_uid"]]["display_code"] == "T1"
+    assert by_uid[first["task_uid"]]["status"] == "archived"
+    assert by_uid[second["task_uid"]]["display_code"] == "T2"
+    assert by_uid[second["task_uid"]]["display_scope"] == "session"
+
+
 def test_archived_task_cannot_be_continued(tmp_path: Path, monkeypatch: Any) -> None:
     client, _db_path, _ = _client(tmp_path, monkeypatch)
     session_uid = _session(client)

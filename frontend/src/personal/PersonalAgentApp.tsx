@@ -156,6 +156,8 @@ export function PersonalAgentApp() {
   const [draftToOpenUid, setDraftToOpenUid] = useState<string>();
   const [draftPanelTab, setDraftPanelTab] = useState<"create" | "current">("create");
   const [draftFilterMode, setDraftFilterMode] = useState<"all" | "session" | "task">("session");
+  const [draftFilterTaskUid, setDraftFilterTaskUid] = useState<string>();
+  const [focusedTaskUid, setFocusedTaskUid] = useState<string>();
   const [renamingSession, setRenamingSession] = useState<PersonalSession>();
   const [renameTitle, setRenameTitle] = useState("");
   const [typewriterKey, setTypewriterKey] = useState<string>();
@@ -479,8 +481,20 @@ export function PersonalAgentApp() {
   const continueDevTaskFromPanel = (task: PersonalDevTask) => {
     if (pendingChatSessionKey || attachmentsUploading) return;
     setSelectedSessionUid(task.session_uid);
+    setFocusedTaskUid(task.task_uid);
     startChatTurn({
       sessionUidOverride: task.session_uid,
+      content: "继续",
+      optimisticMessages: [createPendingAssistantMessage(new Date().toISOString())],
+    });
+  };
+
+  const continueDevTaskFromDraft = (taskUid: string, sessionUid?: string) => {
+    if (!taskUid || pendingChatSessionKey || attachmentsUploading) return;
+    if (sessionUid) setSelectedSessionUid(sessionUid);
+    setFocusedTaskUid(taskUid);
+    startChatTurn({
+      sessionUidOverride: sessionUid || selectedSessionUid,
       content: "继续",
       optimisticMessages: [createPendingAssistantMessage(new Date().toISOString())],
     });
@@ -595,6 +609,8 @@ export function PersonalAgentApp() {
           onSelect={(sessionUid) => {
             clearTypewriterAnimation();
             setSelectedSessionUid(sessionUid);
+            setDraftFilterTaskUid(undefined);
+            setDraftFilterMode("session");
           }}
           onRename={(session) => {
             setRenamingSession(session);
@@ -624,6 +640,8 @@ export function PersonalAgentApp() {
           onNew={() => {
             clearTypewriterAnimation();
             setSelectedSessionUid(undefined);
+            setDraftFilterTaskUid(undefined);
+            setDraftFilterMode("all");
             setLocalErrorBySession((items) => omitKey(items, NEW_SESSION_KEY));
             setOptimisticBySession((items) => omitKey(items, NEW_SESSION_KEY));
           }}
@@ -656,11 +674,15 @@ export function PersonalAgentApp() {
           onOpenDrafts={(draftUid) => {
             setDraftToOpenUid(draftUid);
             setDraftPanelTab("current");
-            setDraftFilterMode(draftUid && currentTask?.task_uid ? "task" : selectedSessionUid ? "session" : "all");
+            setDraftFilterTaskUid(undefined);
+            setDraftFilterMode(selectedSessionUid ? "session" : "all");
             setDraftsOpen(true);
           }}
           onOpenDraftFile={(draftUid) => openDraftFile.mutate(draftUid)}
-          onOpenTasks={() => setTasksOpen(true)}
+          onOpenTasks={() => {
+            setFocusedTaskUid(currentTask?.task_uid);
+            setTasksOpen(true);
+          }}
           onContinueTask={() => {
             if (!selectedSessionUid) return;
             startChatTurn({ content: "继续" });
@@ -695,17 +717,30 @@ export function PersonalAgentApp() {
           currentTask={currentTask}
           filterMode={draftFilterMode}
           onFilterModeChange={setDraftFilterMode}
+          filterTaskUid={draftFilterTaskUid}
+          onFilterTaskUidChange={setDraftFilterTaskUid}
+          onOpenTask={(taskUid, sessionUid) => {
+            if (sessionUid) setSelectedSessionUid(sessionUid);
+            setFocusedTaskUid(taskUid);
+            setTasksOpen(true);
+          }}
+          onContinueTask={(taskUid, sessionUid) => continueDevTaskFromDraft(taskUid, sessionUid)}
+          onFocusTaskDrafts={(taskUid) => {
+            setDraftFilterTaskUid(taskUid);
+            setDraftFilterMode(taskUid ? "task" : selectedSessionUid ? "session" : "all");
+          }}
         />
       </Drawer>
       <Drawer title="任务" open={tasksOpen} onClose={() => setTasksOpen(false)} width={760}>
         <DevTasksPanel
           selectedSessionUid={selectedSessionUid}
-          currentTaskUid={currentTask?.task_uid}
+          currentTaskUid={focusedTaskUid || currentTask?.task_uid}
           onContinueTask={continueDevTaskFromPanel}
-          onOpenDrafts={(draftUid) => {
+          onOpenDrafts={(draftUid, taskUid, sessionUid) => {
             setDraftToOpenUid(draftUid);
             setDraftPanelTab("current");
-            setDraftFilterMode(currentTask?.task_uid ? "task" : selectedSessionUid ? "session" : "all");
+            setDraftFilterTaskUid(taskUid);
+            setDraftFilterMode(taskUid ? "task" : sessionUid ? "session" : "all");
             setDraftsOpen(true);
           }}
         />
@@ -1168,7 +1203,12 @@ function ArtifactDraftsPanel({
   selectedSessionUid,
   currentTask,
   filterMode,
-  onFilterModeChange
+  onFilterModeChange,
+  filterTaskUid,
+  onFilterTaskUidChange,
+  onOpenTask,
+  onContinueTask,
+  onFocusTaskDrafts,
 }: {
   openDraftUid?: string;
   activeTab: "create" | "current";
@@ -1177,6 +1217,11 @@ function ArtifactDraftsPanel({
   currentTask?: PersonalDevTask;
   filterMode: "all" | "session" | "task";
   onFilterModeChange: (value: "all" | "session" | "task") => void;
+  filterTaskUid?: string;
+  onFilterTaskUidChange: (value?: string) => void;
+  onOpenTask?: (taskUid: string, sessionUid?: string) => void;
+  onContinueTask?: (taskUid: string, sessionUid?: string) => void;
+  onFocusTaskDrafts?: (taskUid: string) => void;
 }) {
   const { message } = App.useApp();
   const showError = useMutationErrorHandler();
@@ -1194,7 +1239,7 @@ function ArtifactDraftsPanel({
   const [exportFormat, setExportFormat] = useState("");
   const [compareRevisionIndex, setCompareRevisionIndex] = useState<number>();
   const [manualDownload, setManualDownload] = useState<{ url: string; fileName: string } | null>(null);
-  const draftTaskUid = filterMode === "task" ? currentTask?.task_uid || "" : "";
+  const draftTaskUid = filterMode === "task" ? filterTaskUid || "" : "";
   const draftSessionUid = filterMode === "session" ? selectedSessionUid || "" : "";
 
   const draftsQuery = useQuery({
@@ -1204,6 +1249,7 @@ function ArtifactDraftsPanel({
   });
   const sourcesQuery = useQuery({ queryKey: ["personal-sources"], queryFn: personalAgentApi.sources, retry: false });
   const drafts = draftsQuery.data ?? [];
+  const taskGroups = buildDraftTaskGroups(drafts);
   const activeDraft = drafts.find((item) => item.is_active);
   const selectedDraftSummary = drafts.find((item) => item.draft_uid === selectedDraftUid) ?? activeDraft ?? drafts[0];
   const draftDetailQuery = useQuery({
@@ -1215,6 +1261,8 @@ function ArtifactDraftsPanel({
   const draftDetail = draftDetailQuery.data ?? selectedDraftSummary;
   const selectedRevision = draftDetail?.revisions?.find((item) => item.revision_index === selectedRevisionIndex);
   const previewContent = selectedRevision?.content ?? draftDetail?.content ?? "";
+  const filteredTaskDraft = drafts.find((item) => item.task_uid === draftTaskUid)
+    ?? (draftDetail?.task_uid === draftTaskUid ? draftDetail : undefined);
 
   useEffect(() => {
     if (!selectedDraftUid && selectedDraftSummary?.draft_uid) {
@@ -1233,10 +1281,10 @@ function ArtifactDraftsPanel({
   }, [openDraftUid]);
 
   useEffect(() => {
-    if (filterMode === "task" && !currentTask?.task_uid) {
+    if (filterMode === "task" && !filterTaskUid) {
       onFilterModeChange(selectedSessionUid ? "session" : "all");
     }
-  }, [currentTask?.task_uid, filterMode, onFilterModeChange, selectedSessionUid]);
+  }, [filterTaskUid, filterMode, onFilterModeChange, selectedSessionUid]);
 
   useEffect(() => {
     if (draftDetail?.content !== undefined) {
@@ -1366,6 +1414,46 @@ function ArtifactDraftsPanel({
   const compareText = draftDetail && compareRevision ? buildLineDiff(compareRevision.content, draftDetail.content || "") : "";
   const previewIsDiff = draftDetail ? isDiffDraft(draftDetail) : false;
   const qualityFailures = draftDetail ? qualityFailureSummary(draftDetail) : [];
+  const canContinueTask = draftDetail ? canContinueDraftTask(draftDetail) : false;
+  const taskFilterLabel = filteredTaskDraft ? draftTaskDisplayCode(filteredTaskDraft) : shortId(draftTaskUid);
+
+  const selectDraft = (draftUid: string) => {
+    setSelectedDraftUid(draftUid);
+    setSelectedRevisionIndex(undefined);
+    setReviewTab("preview");
+  };
+
+  const renderDraftCard = (item: PersonalArtifactDraft) => (
+    <div
+      key={item.draft_uid}
+      className={`artifact-item ${item.draft_uid === selectedDraftSummary?.draft_uid ? "active" : ""}`}
+      onClick={() => selectDraft(item.draft_uid)}
+    >
+      <div className="artifact-draft-card">
+        <div className="artifact-draft-card-header">
+          <Typography.Text strong ellipsis title={item.title}>
+            {item.title}
+          </Typography.Text>
+          {item.task_uid
+            ? item.is_stage_current_candidate
+              ? <Tag color="green">当前采用</Tag>
+              : <Tag>历史候选</Tag>
+            : item.is_active
+              ? <Tag color="green">当前</Tag>
+              : null}
+        </div>
+        <Space size={4} wrap className="artifact-draft-meta">
+          <Tag>{documentLabel(item.document_type)}</Tag>
+          <Tag>{draftCandidateLabel(item)}</Tag>
+        </Space>
+        <Space size={4} wrap className="artifact-draft-status">
+          {item.task_uid ? <Tag color="blue">{draftTaskDisplayCode(item)}</Tag> : <Tag>未关联任务</Tag>}
+          {item.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
+          {item.lineage_stale ? <Tag color="orange">上游已更新</Tag> : null}
+        </Space>
+      </div>
+    </div>
+  );
 
   return (
     <div className="artifact-panel">
@@ -1430,48 +1518,57 @@ function ArtifactDraftsPanel({
                       options={[
                         { value: "all", label: "全部" },
                         { value: "session", label: "当前会话", disabled: !selectedSessionUid },
-                        { value: "task", label: "当前任务", disabled: !currentTask?.task_uid },
+                        { value: "task", label: "任务草稿", disabled: !filterTaskUid && !currentTask?.task_uid },
                       ]}
                     />
                     <Typography.Text type="secondary" className="personal-small">
                       {filterMode === "task"
-                        ? `仅显示任务 ${shortId(currentTask?.task_uid || "")} 的草稿`
+                        ? `仅显示 ${taskFilterLabel} 的草稿`
                         : filterMode === "session"
                           ? "仅显示当前会话草稿"
                           : "显示全部草稿"}
                     </Typography.Text>
-                  <List
-                    loading={draftsQuery.isLoading}
-                    dataSource={drafts}
-                    locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有草稿" /> }}
-                    renderItem={(item) => (
-                      <List.Item
-                        className={`artifact-item ${item.draft_uid === selectedDraftSummary?.draft_uid ? "active" : ""}`}
-                        onClick={() => {
-                          setSelectedDraftUid(item.draft_uid);
-                          setSelectedRevisionIndex(undefined);
-                          setReviewTab("preview");
-                        }}
-                      >
-                        <div className="artifact-draft-card">
-                          <div className="artifact-draft-card-header">
-                            <Typography.Text strong ellipsis title={item.title}>
-                              {item.title}
-                            </Typography.Text>
-                            {item.is_active ? <Tag color="green">当前</Tag> : null}
+                    {taskGroups.length ? (
+                      <div className="artifact-group-list">
+                        {taskGroups.map((group) => (
+                          <div key={group.key} className="artifact-task-group">
+                            <div className="artifact-task-group-header">
+                              <Space wrap size={6}>
+                                {group.isUnlinked ? <Tag>未关联任务</Tag> : <Tag color="blue">{group.taskDisplayCode || shortId(group.taskUid)}</Tag>}
+                                {filterMode === "all" && group.sessionUid ? (
+                                  <Typography.Text type="secondary" className="personal-small">
+                                    会话 {shortId(group.sessionUid)}
+                                  </Typography.Text>
+                                ) : null}
+                                <Typography.Text strong ellipsis={{ tooltip: group.taskTitle || "未关联任务" }}>
+                                  {group.taskTitle || "未关联任务"}
+                                </Typography.Text>
+                                {group.taskStatus ? <Tag>{group.taskStatus}</Tag> : null}
+                              </Space>
+                            </div>
+                            {group.stages.map((stage) => (
+                              <div key={stage.key} className="artifact-stage-group">
+                                <Typography.Text type="secondary" className="artifact-stage-group-title">
+                                  {documentLabel(stage.documentType)}
+                                </Typography.Text>
+                                <div className="artifact-candidate-list">
+                                  {stage.candidates.map((candidate) => (
+                                    <div key={candidate.key} className="artifact-candidate-group">
+                                      <Typography.Text type="secondary" className="artifact-candidate-label">
+                                        {candidate.label}
+                                      </Typography.Text>
+                                      {renderDraftCard(candidate.draft)}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
                           </div>
-                          <Space size={4} wrap className="artifact-draft-meta">
-                            <Tag>{documentLabel(item.document_type)}</Tag>
-                            <Tag>v{item.current_revision}</Tag>
-                          </Space>
-                          <Space size={4} wrap className="artifact-draft-status">
-                            {item.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
-                            {item.lineage_stale ? <Tag color="orange">上游已更新</Tag> : null}
-                          </Space>
-                        </div>
-                      </List.Item>
+                        ))}
+                      </div>
+                    ) : (
+                      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有草稿" />
                     )}
-                  />
                   </Space>
                 </div>
                 <div className="artifact-preview">
@@ -1484,7 +1581,7 @@ function ArtifactDraftsPanel({
                           <Typography.Title level={5}>{draftDetail.title}</Typography.Title>
                           <Space size={6} wrap>
                             <Tag>{documentLabel(draftDetail.document_type)}</Tag>
-                            <Tag>v{draftDetail.current_revision}</Tag>
+                            <Tag>{draftCandidateLabel(draftDetail)}</Tag>
                             {draftDetail.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
                             {draftDetail.lineage_stale ? <Tag color="orange">上游已更新</Tag> : null}
                           </Space>
@@ -1499,6 +1596,54 @@ function ArtifactDraftsPanel({
                           </Button>
                         ) : null}
                       </div>
+                      {draftDetail.task_uid ? (
+                        <div className="artifact-task-context">
+                          <Space direction="vertical" size={8} className="full-width">
+                            <Space wrap size={6}>
+                              <Tag color="blue">{draftTaskDisplayCode(draftDetail)}</Tag>
+                              <Typography.Text strong>{draftDetail.task_title || "未命名任务"}</Typography.Text>
+                              {draftDetail.task_status ? <Tag>{draftDetail.task_status}</Tag> : null}
+                              {draftDetail.task_current_step ? <Tag>{documentLabel(draftDetail.task_current_step)}</Tag> : null}
+                              <Tag>{draftCandidateLabel(draftDetail)}</Tag>
+                              {draftDetail.is_stage_current_candidate ? <Tag color="green">当前采用</Tag> : <Tag>历史候选</Tag>}
+                            </Space>
+                            <Space wrap size={8}>
+                              <Button size="small" onClick={() => onOpenTask?.(draftDetail.task_uid!, draftDetail.session_uid)}>
+                                查看任务
+                              </Button>
+                              <Tooltip title={canContinueTask ? undefined : "该任务已结束，不能继续推进"}>
+                                <span>
+                                  <Button
+                                    size="small"
+                                    type="primary"
+                                    disabled={!canContinueTask}
+                                    onClick={() => onContinueTask?.(draftDetail.task_uid!, draftDetail.session_uid)}
+                                  >
+                                    继续推进
+                                  </Button>
+                                </span>
+                              </Tooltip>
+                              <Button
+                                size="small"
+                                onClick={() => {
+                                  onFilterTaskUidChange(draftDetail.task_uid!);
+                                  onFilterModeChange("task");
+                                  onFocusTaskDrafts?.(draftDetail.task_uid!);
+                                }}
+                              >
+                                只看此任务草稿
+                              </Button>
+                            </Space>
+                          </Space>
+                        </div>
+                      ) : (
+                        <Alert
+                          type="info"
+                          showIcon
+                          message="未关联任务"
+                          description="这份草稿可能来自手动创建或旧流程，不属于当前开发任务线。"
+                        />
+                      )}
                       <div className="artifact-toolbar">
                         <Space wrap size={8}>
                           <span className="artifact-toolbar-label">导出格式</span>
@@ -2403,7 +2548,7 @@ function DevTasksPanel({
   selectedSessionUid?: string;
   currentTaskUid?: string;
   onContinueTask?: (task: PersonalDevTask) => void;
-  onOpenDrafts: (draftUid?: string) => void;
+  onOpenDrafts: (draftUid?: string, taskUid?: string, sessionUid?: string) => void;
 }) {
   const [scope, setScope] = useState<"session" | "all">(selectedSessionUid ? "session" : "all");
   const sessionUid = scope === "session" ? selectedSessionUid || "" : "";
@@ -2449,9 +2594,22 @@ function DevTasksPanel({
                   <Tag color={task.status === "blocked" ? "volcano" : task.status === "completed" ? "green" : task.status === "archived" ? "default" : "blue"}>
                     {task.status}
                   </Tag>
-                  <Tag>{shortId(task.task_uid)}</Tag>
+                  <Tooltip title={task.task_uid}>
+                    <Tag color="blue">{taskDisplayCode(task)}</Tag>
+                  </Tooltip>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<CopyOutlined />}
+                    onClick={() => navigator.clipboard?.writeText(task.task_uid)}
+                  />
                   <Tag>{doneCount}/{task.stages.length}</Tag>
                 </Space>
+                {scope === "all" ? (
+                  <Typography.Text type="secondary" className="personal-small">
+                    会话 {shortId(task.session_uid)}
+                  </Typography.Text>
+                ) : null}
                 <Typography.Text type="secondary" className="personal-small">
                   {focusStage ? `当前/下一阶段：${documentLabel(focusStage.document_type)} · ${focusStage.effective_status}` : "阶段已完成"}
                 </Typography.Text>
@@ -2462,7 +2620,7 @@ function DevTasksPanel({
                       key={`${task.task_uid}-${stage.document_type}`}
                       color={stage.effective_status === "done" ? "green" : stage.effective_status === "needs_revision" ? "volcano" : "default"}
                       className={stage.draft_uid ? "clickable-tag" : ""}
-                      onClick={() => stage.draft_uid && onOpenDrafts(stage.draft_uid)}
+                      onClick={() => stage.draft_uid && onOpenDrafts(stage.draft_uid, task.task_uid, task.session_uid)}
                     >
                       {documentLabel(stage.document_type)}:{stage.effective_status}
                     </Tag>
@@ -2982,6 +3140,133 @@ function shortId(value: string) {
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
 }
 
+type DraftCandidateGroup = {
+  key: string;
+  label: string;
+  draft: PersonalArtifactDraft;
+};
+
+type DraftStageGroup = {
+  key: string;
+  documentType: string;
+  stageIndex: number | null;
+  drafts: PersonalArtifactDraft[];
+  candidates: DraftCandidateGroup[];
+};
+
+type DraftTaskGroup = {
+  key: string;
+  taskUid: string;
+  isUnlinked: boolean;
+  taskDisplayCode: string;
+  taskTitle: string;
+  taskStatus: string;
+  taskDisplayScope: string;
+  taskSessionDisplayIndex: number | null;
+  sessionUid: string;
+  drafts: PersonalArtifactDraft[];
+  stages: DraftStageGroup[];
+};
+
+function taskDisplayCode(task?: Pick<PersonalDevTask, "display_code" | "task_uid">) {
+  return task?.display_code || shortId(task?.task_uid || "");
+}
+
+function draftTaskDisplayCode(draft: Pick<PersonalArtifactDraft, "task_display_code" | "task_uid">) {
+  return draft.task_display_code || (draft.task_uid ? shortId(draft.task_uid) : "");
+}
+
+function draftCandidateLabel(draft: Pick<PersonalArtifactDraft, "task_uid" | "candidate_index" | "stage_candidate_count" | "current_revision">) {
+  if (!draft.task_uid || !draft.candidate_index) return `鐗堟湰 v${draft.current_revision}`;
+  const total = draft.stage_candidate_count || draft.candidate_index;
+  return `鍊欓€?${draft.candidate_index}/${total} 路 鐗堟湰 v${draft.current_revision}`;
+}
+
+function buildDraftTaskGroups(drafts: PersonalArtifactDraft[]): DraftTaskGroup[] {
+  const taskOrder: string[] = [];
+  const taskMap = new Map<string, DraftTaskGroup>();
+  for (const draft of drafts) {
+    const taskKey = draft.task_uid ? `${draft.session_uid || "__no_session__"}:${draft.task_uid}` : "unassigned";
+    if (!taskMap.has(taskKey)) {
+      taskOrder.push(taskKey);
+      taskMap.set(taskKey, {
+        key: taskKey,
+        taskUid: draft.task_uid || "",
+        isUnlinked: !draft.task_uid,
+        taskDisplayCode: draftTaskDisplayCode(draft),
+        taskTitle: draft.task_title || (!draft.task_uid ? "未关联任务" : ""),
+        taskStatus: draft.task_status || "",
+        taskDisplayScope: draft.task_display_scope || "",
+        taskSessionDisplayIndex: draft.task_session_display_index ?? null,
+        sessionUid: draft.task_uid ? draft.session_uid || "" : "",
+        drafts: [],
+        stages: [],
+      });
+    }
+    taskMap.get(taskKey)!.drafts.push(draft);
+  }
+  return taskOrder.map((taskKey) => {
+    const taskGroup = taskMap.get(taskKey)!;
+    const stageOrder: string[] = [];
+    const stageMap = new Map<string, DraftStageGroup>();
+    for (const draft of taskGroup.drafts) {
+      const stageKey = draft.document_type;
+      if (!stageMap.has(stageKey)) {
+        stageOrder.push(stageKey);
+        stageMap.set(stageKey, {
+          key: `${taskGroup.key}:${stageKey}`,
+          documentType: draft.document_type,
+          stageIndex: draft.stage_index ?? null,
+          drafts: [],
+          candidates: [],
+        });
+      }
+      stageMap.get(stageKey)!.drafts.push(draft);
+    }
+    return {
+      ...taskGroup,
+      drafts: [...taskGroup.drafts].sort((left, right) => {
+        const leftCandidate = left.candidate_index ?? Number.MAX_SAFE_INTEGER;
+        const rightCandidate = right.candidate_index ?? Number.MAX_SAFE_INTEGER;
+        if (leftCandidate !== rightCandidate) return leftCandidate - rightCandidate;
+        return (left.id ?? 0) - (right.id ?? 0);
+      }),
+      stages: stageOrder
+        .map((stageKey) => {
+          const group = stageMap.get(stageKey)!;
+          const sortedDrafts = [...group.drafts].sort((left, right) => {
+            const leftCandidate = left.candidate_index ?? Number.MAX_SAFE_INTEGER;
+            const rightCandidate = right.candidate_index ?? Number.MAX_SAFE_INTEGER;
+            if (leftCandidate !== rightCandidate) return leftCandidate - rightCandidate;
+            return (left.id ?? 0) - (right.id ?? 0);
+          });
+          return {
+            ...group,
+            drafts: sortedDrafts,
+            candidates: sortedDrafts.map((draft) => ({
+              key: `${group.key}:${draft.draft_uid}`,
+              label: draftCandidateLabel(draft),
+              draft,
+            })),
+          };
+        })
+        .sort((left, right) => {
+          const leftIndex = left.stageIndex ?? Number.MAX_SAFE_INTEGER;
+          const rightIndex = right.stageIndex ?? Number.MAX_SAFE_INTEGER;
+          if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+          return left.documentType.localeCompare(right.documentType);
+        }),
+    };
+  }).sort((left, right) => {
+    if (left.isUnlinked !== right.isUnlinked) return left.isUnlinked ? 1 : -1;
+    const leftIndex = left.taskSessionDisplayIndex ?? Number.MAX_SAFE_INTEGER;
+    const rightIndex = right.taskSessionDisplayIndex ?? Number.MAX_SAFE_INTEGER;
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+    if (left.sessionUid !== right.sessionUid) return left.sessionUid.localeCompare(right.sessionUid);
+    return left.taskUid.localeCompare(right.taskUid);
+  });
+}
+
 function documentLabel(value: string) {
   return documentTypeOptions.find((item) => item.value === value)?.label || value;
 }
@@ -3016,6 +3301,11 @@ function regenerateDraftDescription(draft: PersonalArtifactDraft) {
     return "将基于当前代码 Patch 草稿创建新的候选草稿，不会应用到项目文件。确认继续？";
   }
   return "将创建新的草稿候选版本，不会直接修改项目文件。确认继续？";
+}
+
+function canContinueDraftTask(draft: Pick<PersonalArtifactDraft, "task_uid" | "task_status">) {
+  if (!draft.task_uid) return false;
+  return draft.task_status === "active" || draft.task_status === "blocked";
 }
 
 function qualityFailureSummary(draft: PersonalArtifactDraft): string[] {

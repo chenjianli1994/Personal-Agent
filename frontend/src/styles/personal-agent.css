@@ -501,6 +501,50 @@
   padding-right: 10px;
 }
 
+.artifact-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.artifact-task-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.artifact-task-group-header {
+  min-width: 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #e4edf5;
+}
+
+.artifact-stage-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.artifact-stage-group-title {
+  font-size: 12px;
+}
+
+.artifact-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.artifact-candidate-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.artifact-candidate-label {
+  font-size: 12px;
+}
+
 .source-item {
   cursor: pointer;
   border: 1px solid transparent;
@@ -605,6 +649,13 @@
 
 .artifact-detail-title .ant-typography {
   margin: 0;
+}
+
+.artifact-task-context {
+  padding: 12px;
+  border: 1px solid #dbe5ee;
+  border-radius: 10px;
+  background: #f8fbff;
 }
 
 .artifact-toolbar {

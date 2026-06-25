@@ -8,6 +8,7 @@ from uuid import uuid4
 from personal_agent.core.database import connect
 from personal_agent.core.utils import json_dumps, utc_now
 
+DEV_TASK_TYPE = "personal_dev_document_pipeline_v3"
 
 DOCUMENT_TYPES = {
     "requirement_analysis_report",
@@ -147,7 +148,9 @@ def list_artifact_drafts(
             """,
             params,
         ).fetchall()
-    return [_draft_row_to_payload(row, include_content=False) for row in rows]
+        drafts = [_draft_row_to_payload(row, include_content=False) for row in rows]
+        _enrich_draft_task_context(conn, drafts=drafts, project_id=project_id)
+    return drafts
 
 
 def get_artifact_draft(db_path: Path, *, project_id: int, draft_uid: str) -> dict[str, Any]:
@@ -174,7 +177,8 @@ def get_artifact_draft(db_path: Path, *, project_id: int, draft_uid: str) -> dic
             """,
             (project_id, draft_uid),
         ).fetchall()
-    payload = _draft_row_to_payload(row, include_content=True)
+        payload = _draft_row_to_payload(row, include_content=True)
+        _enrich_draft_task_context(conn, drafts=[payload], project_id=project_id)
     payload["revisions"] = [_revision_row_to_payload(item) for item in revisions]
     return payload
 
@@ -381,6 +385,219 @@ def _draft_row_to_payload(row: Any, *, include_content: bool) -> dict[str, Any]:
     if include_content:
         payload["content"] = current_content
     return payload
+
+
+def _enrich_draft_task_context(conn: Any, *, drafts: list[dict[str, Any]], project_id: int) -> None:
+    for draft in drafts:
+        draft.update(_default_draft_task_context())
+    task_uids = sorted({str(draft.get("task_uid") or "").strip() for draft in drafts if str(draft.get("task_uid") or "").strip()})
+    if not task_uids:
+        return
+    task_rows = _task_rows_by_uid(conn, project_id=project_id, task_uids=task_uids)
+    if not task_rows:
+        return
+    task_display_metadata = _task_display_metadata(task_rows=task_rows, conn=conn, project_id=project_id)
+    effective_stages_by_task = _effective_stages_by_task(conn, project_id=project_id, task_uids=task_uids)
+    current_stage_draft_uids = {
+        (task_uid, stage["document_type"]): str(stage["draft_uid"] or "")
+        for task_uid, stages in effective_stages_by_task.items()
+        for stage in stages
+        if str(stage.get("draft_uid") or "")
+    }
+    task_context_by_uid: dict[str, dict[str, Any]] = {}
+    for task_uid, row in task_rows.items():
+        plan = _loads_json(row["plan_json"], {})
+        stages = effective_stages_by_task.get(task_uid, _build_effective_stages([]))
+        blocked_reason = str(plan.get("blocked_reason") or row["error_message"] or "")
+        task_context_by_uid[task_uid] = {
+            "task_display_code": task_display_metadata.get(task_uid, {}).get("display_code", ""),
+            "task_session_display_index": task_display_metadata.get(task_uid, {}).get("session_display_index"),
+            "task_title": str(row["title"] or ""),
+            "task_status": str(row["status"] or ""),
+            "task_current_step": str(row["current_step"] or ""),
+            "task_next_action": _next_action(stages, blocked_reason),
+            "task_display_scope": task_display_metadata.get(task_uid, {}).get("display_scope", ""),
+        }
+    candidate_metadata = _candidate_metadata_by_draft_uid(conn, project_id=project_id, task_uids=task_uids)
+    stage_order_index = {document_type: index for index, document_type in enumerate(_dev_task_stage_order())}
+    for draft in drafts:
+        task_uid = str(draft.get("task_uid") or "").strip()
+        if not task_uid:
+            continue
+        draft.update(task_context_by_uid.get(task_uid, {}))
+        document_type = str(draft.get("document_type") or "").strip()
+        draft["stage_index"] = stage_order_index.get(document_type)
+        candidate = candidate_metadata.get(str(draft.get("draft_uid") or ""))
+        draft["candidate_index"] = candidate["candidate_index"] if candidate else None
+        draft["stage_candidate_count"] = candidate["stage_candidate_count"] if candidate else 0
+        draft["is_stage_current_candidate"] = current_stage_draft_uids.get((task_uid, document_type), "") == str(draft.get("draft_uid") or "")
+
+
+def _default_draft_task_context() -> dict[str, Any]:
+    return {
+        "task_display_code": "",
+        "task_session_display_index": None,
+        "task_title": "",
+        "task_status": "",
+        "task_current_step": "",
+        "task_next_action": {},
+        "task_display_scope": "",
+        "stage_index": None,
+        "candidate_index": None,
+        "stage_candidate_count": 0,
+        "is_stage_current_candidate": False,
+    }
+
+
+def _task_rows_by_uid(conn: Any, *, project_id: int, task_uids: list[str]) -> dict[str, Any]:
+    placeholders = ",".join("?" for _ in task_uids)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM agent_tasks
+        WHERE project_id=? AND task_type=? AND task_uid IN ({placeholders})
+        """,
+        (project_id, DEV_TASK_TYPE, *task_uids),
+    ).fetchall()
+    return {str(row["task_uid"] or "").strip(): row for row in rows if str(row["task_uid"] or "").strip()}
+
+
+def _task_display_metadata(*, task_rows: dict[str, Any], conn: Any, project_id: int) -> dict[str, dict[str, Any]]:
+    metadata_by_uid: dict[str, dict[str, Any]] = {}
+    session_uids = {str(row["session_uid"] or "").strip() for row in task_rows.values() if str(row["session_uid"] or "").strip()}
+    for session_uid in session_uids:
+        indexes = _task_display_indexes(conn, project_id=project_id, session_uid=session_uid)
+        for task_uid, index in indexes.items():
+            if task_uid not in task_rows:
+                continue
+            metadata_by_uid[task_uid] = {
+                "display_code": f"T{index}" if index else "",
+                "session_display_index": index,
+                "display_scope": "session",
+            }
+    if any(not str(row["session_uid"] or "").strip() for row in task_rows.values()):
+        indexes = _task_display_indexes(conn, project_id=project_id, session_uid="")
+        for task_uid, index in indexes.items():
+            if task_uid not in task_rows or task_uid in metadata_by_uid:
+                continue
+            metadata_by_uid[task_uid] = {
+                "display_code": f"T{index}" if index else "",
+                "session_display_index": index,
+                "display_scope": "project_fallback",
+            }
+    return metadata_by_uid
+
+
+def _task_display_indexes(conn: Any, *, project_id: int, session_uid: str) -> dict[str, int]:
+    if session_uid.strip():
+        rows = conn.execute(
+            """
+            SELECT task_uid
+            FROM agent_tasks
+            WHERE project_id=? AND session_uid=? AND task_type=?
+            ORDER BY id ASC
+            """,
+            (project_id, session_uid.strip(), DEV_TASK_TYPE),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT task_uid
+            FROM agent_tasks
+            WHERE project_id=? AND task_type=?
+            ORDER BY id ASC
+            """,
+            (project_id, DEV_TASK_TYPE),
+        ).fetchall()
+    return {str(row["task_uid"] or "").strip(): index + 1 for index, row in enumerate(rows) if str(row["task_uid"] or "").strip()}
+
+
+def _candidate_metadata_by_draft_uid(conn: Any, *, project_id: int, task_uids: list[str]) -> dict[str, dict[str, int]]:
+    placeholders = ",".join("?" for _ in task_uids)
+    rows = conn.execute(
+        f"""
+        SELECT id, draft_uid, task_uid, document_type
+        FROM personal_drafts
+        WHERE project_id=? AND task_uid IN ({placeholders}) AND status IN ('active', 'quality_failed')
+        ORDER BY id ASC
+        """,
+        (project_id, *task_uids),
+    ).fetchall()
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for row in rows:
+        task_uid = str(row["task_uid"] or "").strip()
+        document_type = str(row["document_type"] or "").strip()
+        draft_uid = str(row["draft_uid"] or "").strip()
+        if not task_uid or not draft_uid:
+            continue
+        grouped.setdefault((task_uid, document_type), []).append(draft_uid)
+    metadata_by_uid: dict[str, dict[str, int]] = {}
+    for draft_uids in grouped.values():
+        total = len(draft_uids)
+        for index, draft_uid in enumerate(draft_uids, start=1):
+            metadata_by_uid[draft_uid] = {"candidate_index": index, "stage_candidate_count": total}
+    return metadata_by_uid
+
+
+def _effective_stages_by_task(conn: Any, *, project_id: int, task_uids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    placeholders = ",".join("?" for _ in task_uids)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM personal_drafts
+        WHERE project_id=? AND task_uid IN ({placeholders}) AND status IN ('active', 'quality_failed')
+        ORDER BY task_uid ASC, is_active DESC, id DESC
+        """,
+        (project_id, *task_uids),
+    ).fetchall()
+    grouped_rows: dict[str, list[Any]] = {task_uid: [] for task_uid in task_uids}
+    for row in rows:
+        grouped_rows.setdefault(str(row["task_uid"] or "").strip(), []).append(row)
+    return {task_uid: _build_effective_stages(grouped_rows.get(task_uid, [])) for task_uid in task_uids}
+
+
+def _build_effective_stages(rows: list[Any]) -> list[dict[str, Any]]:
+    latest_by_type: dict[str, Any] = {}
+    for row in rows:
+        latest_by_type.setdefault(str(row["document_type"]), row)
+    stages: list[dict[str, Any]] = []
+    for index, document_type in enumerate(_dev_task_stage_order()):
+        draft = latest_by_type.get(document_type)
+        if draft is None:
+            status = "pending"
+            draft_uid = ""
+            lineage_stale = False
+            draft_status = ""
+        else:
+            draft_uid = str(draft["draft_uid"])
+            draft_status = str(draft["status"])
+            lineage_stale = bool(draft["lineage_stale"])
+            status = "needs_revision" if draft_status == "quality_failed" or lineage_stale else "done"
+        stages.append(
+            {
+                "index": index,
+                "document_type": document_type,
+                "effective_status": status,
+                "draft_uid": draft_uid,
+                "draft_status": draft_status,
+                "lineage_stale": lineage_stale,
+            }
+        )
+    return stages
+
+
+def _next_action(stages: list[dict[str, Any]], blocked_reason: str) -> dict[str, Any]:
+    for stage in stages:
+        if stage["effective_status"] == "needs_revision":
+            return {"action": "revise_draft", "stage": stage["document_type"], "reason": blocked_reason or "stage needs revision"}
+    for stage in stages:
+        if stage["effective_status"] == "pending":
+            return {"action": "continue", "stage": stage["document_type"], "reason": blocked_reason}
+    return {"action": "completed", "stage": "", "reason": ""}
+
+
+def _dev_task_stage_order() -> list[str]:
+    return list(DOCUMENT_LINEAGE_ORDER[: DOCUMENT_LINEAGE_ORDER.index("test_case_spec") + 1])
 
 
 def _revision_row_to_payload(row: Any) -> dict[str, Any]:

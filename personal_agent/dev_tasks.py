@@ -100,8 +100,16 @@ class DevTaskOrchestrator:
         return self._advance_one(task_uid.strip(), action_type="continue")
 
     def get(self, task_uid: str) -> dict[str, Any]:
-        row = self._task_row(task_uid.strip())
-        return self._task_payload(row)
+        task_uid = task_uid.strip()
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_tasks WHERE project_id=? AND task_uid=? AND task_type=?",
+                (self.project_id, task_uid, DEV_TASK_TYPE),
+            ).fetchone()
+            if row is None:
+                raise ValueError("dev task not found")
+            display_metadata = self._task_display_metadata_for_rows(conn, [row]).get(task_uid)
+        return self._task_payload(row, display_metadata=display_metadata)
 
     def trace(self, task_uid: str) -> dict[str, Any]:
         return self.trace_service.trace_for_task(task_uid.strip())
@@ -312,7 +320,8 @@ class DevTaskOrchestrator:
                 "SELECT * FROM agent_tasks WHERE " + " AND ".join(where) + " ORDER BY id DESC",
                 params,
             ).fetchall()
-        return [self._task_payload(row) for row in rows]
+            display_metadata = self._task_display_metadata_for_rows(conn, rows)
+        return [self._task_payload(row, display_metadata=display_metadata.get(str(row["task_uid"]))) for row in rows]
 
     def active_task_for_session(self, session_uid: str) -> dict[str, Any] | None:
         with connect(self.db_path) as conn:
@@ -324,7 +333,8 @@ class DevTaskOrchestrator:
                 """,
                 (self.project_id, session_uid, DEV_TASK_TYPE),
             ).fetchone()
-        return self._task_payload(row) if row else None
+            display_metadata = self._task_display_metadata_for_rows(conn, [row]).get(str(row["task_uid"])) if row else None
+        return self._task_payload(row, display_metadata=display_metadata) if row else None
 
     def record_validation(self, *, task_uid: str, kind: str, result: dict[str, Any]) -> dict[str, Any] | None:
         task_uid = task_uid.strip()
@@ -430,11 +440,12 @@ class DevTaskOrchestrator:
         }
         return apply_personal_policy(route, context)
 
-    def _task_payload(self, row: Any) -> dict[str, Any]:
+    def _task_payload(self, row: Any, *, display_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         plan = _loads_json(row["plan_json"], {})
         stages = self._effective_stages(str(row["task_uid"]))
         next_action = self._next_action(stages, str(plan.get("blocked_reason") or ""))
         trace = self.trace_service.trace_for_task(str(row["task_uid"]))
+        metadata = display_metadata or {}
         return {
             "id": row["id"],
             "task_uid": row["task_uid"],
@@ -457,6 +468,9 @@ class DevTaskOrchestrator:
             "validation_summary": plan.get("validation_summary") or {},
             "requirements": trace["requirements"],
             "trace_summary": trace["trace_summary"],
+            "display_code": metadata.get("display_code", ""),
+            "session_display_index": metadata.get("session_display_index"),
+            "display_scope": metadata.get("display_scope", ""),
         }
 
     def _effective_stages(self, task_uid: str) -> list[dict[str, Any]]:
@@ -570,6 +584,59 @@ class DevTaskOrchestrator:
         if row is None:
             raise ValueError("dev task not found")
         return row
+
+    def _task_display_metadata_for_rows(self, conn: Any, rows: list[Any]) -> dict[str, dict[str, Any]]:
+        metadata_by_uid: dict[str, dict[str, Any]] = {}
+        if not rows:
+            return metadata_by_uid
+        task_uids = {str(row["task_uid"] or "").strip() for row in rows if str(row["task_uid"] or "").strip()}
+        if not task_uids:
+            return metadata_by_uid
+        session_uids = {str(row["session_uid"] or "").strip() for row in rows if str(row["session_uid"] or "").strip()}
+        for session_uid in session_uids:
+            indexes = self._task_display_indexes(conn, session_uid=session_uid)
+            for task_uid, index in indexes.items():
+                if task_uid not in task_uids:
+                    continue
+                metadata_by_uid[task_uid] = {
+                    "display_code": f"T{index}" if index else "",
+                    "session_display_index": index,
+                    "display_scope": "session",
+                }
+        if any(not str(row["session_uid"] or "").strip() for row in rows):
+            fallback_indexes = self._task_display_indexes(conn, session_uid="")
+            for task_uid, index in fallback_indexes.items():
+                if task_uid not in task_uids or task_uid in metadata_by_uid:
+                    continue
+                metadata_by_uid[task_uid] = {
+                    "display_code": f"T{index}" if index else "",
+                    "session_display_index": index,
+                    "display_scope": "project_fallback",
+                }
+        return metadata_by_uid
+
+    def _task_display_indexes(self, conn: Any, *, session_uid: str) -> dict[str, int]:
+        if session_uid.strip():
+            rows = conn.execute(
+                """
+                SELECT task_uid
+                FROM agent_tasks
+                WHERE project_id=? AND session_uid=? AND task_type=?
+                ORDER BY id ASC
+                """,
+                (self.project_id, session_uid.strip(), DEV_TASK_TYPE),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT task_uid
+                FROM agent_tasks
+                WHERE project_id=? AND task_type=?
+                ORDER BY id ASC
+                """,
+                (self.project_id, DEV_TASK_TYPE),
+            ).fetchall()
+        return {str(item["task_uid"] or "").strip(): index + 1 for index, item in enumerate(rows) if str(item["task_uid"] or "").strip()}
 
     def _require_session(self, session_uid: str) -> None:
         with connect(self.db_path) as conn:
