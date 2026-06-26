@@ -25,7 +25,7 @@ import {
   Upload
 } from "antd";
 import { BookOutlined, BranchesOutlined, BulbOutlined, CheckCircleOutlined, CloudDownloadOutlined, CodeOutlined, CopyOutlined, DeleteOutlined, DiffOutlined, EditOutlined, ExperimentOutlined, FileDoneOutlined, FileProtectOutlined, FileTextOutlined, HistoryOutlined, MoreOutlined, PlayCircleOutlined, ReloadOutlined, RobotOutlined, SearchOutlined, ThunderboltOutlined, ToolOutlined, UploadOutlined } from "@ant-design/icons";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { personalAgentApi } from "./api";
 import { ApiError } from "../api/client";
@@ -73,6 +73,11 @@ import "../styles/personal-agent.css";
 type DraftReviewTab = "preview" | "revise" | "versions" | "quality";
 type DraftFilterMode = "all" | "session" | "task" | "unlinked" | "trash";
 const NEW_SESSION_KEY = "__new_session__";
+const DRAFT_DRAWER_DEFAULT_WIDTH = 980;
+const DRAFT_DRAWER_MIN_WIDTH = 920;
+const DRAFT_DRAWER_MAX_WIDTH = 1440;
+const DRAFT_DRAWER_MOBILE_BREAKPOINT = 768;
+const DRAFT_DRAWER_RESIZE_VIEWPORT_MIN = DRAFT_DRAWER_MIN_WIDTH + 24;
 
 type ChatTurnVariables = {
   body: Parameters<typeof personalAgentApi.chatTurn>[0];
@@ -134,6 +139,21 @@ function createPendingAssistantMessage(createdAt: string): LocalMessage {
   };
 }
 
+function clampDraftDrawerWidth(width: number) {
+  return Math.min(DRAFT_DRAWER_MAX_WIDTH, Math.max(DRAFT_DRAWER_MIN_WIDTH, width));
+}
+
+function getViewportWidth() {
+  return typeof window === "undefined" ? DRAFT_DRAWER_DEFAULT_WIDTH : window.innerWidth;
+}
+
+function resolveDraftDrawerWidth(preferredWidth: number, viewportWidth: number) {
+  if (viewportWidth <= DRAFT_DRAWER_MOBILE_BREAKPOINT) {
+    return viewportWidth;
+  }
+  return Math.min(preferredWidth, Math.max(420, viewportWidth - 24));
+}
+
 export function PersonalAgentApp() {
   const { message, modal } = App.useApp();
   const { mode } = useThemeMode();
@@ -165,8 +185,12 @@ export function PersonalAgentApp() {
   const [renameTitle, setRenameTitle] = useState("");
   const [typewriterKey, setTypewriterKey] = useState<string>();
   const [animationVersion, setAnimationVersion] = useState(0);
+  const [draftDrawerWidth, setDraftDrawerWidth] = useState(DRAFT_DRAWER_DEFAULT_WIDTH);
+  const [isDraftDrawerResizing, setIsDraftDrawerResizing] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(getViewportWidth);
   const hasAutoSelected = useRef(false);
   const chatAbortControllerRef = useRef<AbortController | null>(null);
+  const draftDrawerResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const contextQuery = useQuery({ queryKey: ["personal-context"], queryFn: personalAgentApi.context, retry: false });
   const llmConfigQuery = useQuery({ queryKey: ["personal-llm-config"], queryFn: personalAgentApi.llmConfig, retry: false, refetchInterval: 15000 });
@@ -207,6 +231,99 @@ export function PersonalAgentApp() {
     setTypewriterKey(undefined);
     setAnimationVersion((value) => value + 1);
   };
+
+  const isDraftDrawerResizeEnabled = viewportWidth >= DRAFT_DRAWER_RESIZE_VIEWPORT_MIN;
+  const effectiveDraftDrawerWidth = resolveDraftDrawerWidth(draftDrawerWidth, viewportWidth);
+  const effectiveDraftDrawerMinWidth = isDraftDrawerResizeEnabled ? DRAFT_DRAWER_MIN_WIDTH : effectiveDraftDrawerWidth;
+  const effectiveDraftDrawerMaxWidth = isDraftDrawerResizeEnabled
+    ? Math.max(420, Math.min(DRAFT_DRAWER_MAX_WIDTH, viewportWidth - 24))
+    : effectiveDraftDrawerWidth;
+
+  const startDraftDrawerResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    draftDrawerResizeStateRef.current = {
+      startX: event.clientX,
+      startWidth: draftDrawerWidth,
+    };
+    setIsDraftDrawerResizing(true);
+  };
+
+  const resetDraftDrawerWidth = () => {
+    setDraftDrawerWidth(DRAFT_DRAWER_DEFAULT_WIDTH);
+  };
+
+  const handleDraftDrawerResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    switch (event.key) {
+      case "ArrowLeft":
+        event.preventDefault();
+        setDraftDrawerWidth((value) => clampDraftDrawerWidth(value + 32));
+        break;
+      case "ArrowRight":
+        event.preventDefault();
+        setDraftDrawerWidth((value) => clampDraftDrawerWidth(value - 32));
+        break;
+      case "Home":
+        event.preventDefault();
+        setDraftDrawerWidth(DRAFT_DRAWER_MIN_WIDTH);
+        break;
+      case "End":
+        event.preventDefault();
+        setDraftDrawerWidth(DRAFT_DRAWER_MAX_WIDTH);
+        break;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        resetDraftDrawerWidth();
+        break;
+      default:
+        break;
+    }
+  };
+
+  useEffect(() => {
+    const syncViewportWidth = () => {
+      setViewportWidth(getViewportWidth());
+    };
+
+    syncViewportWidth();
+    window.addEventListener("resize", syncViewportWidth);
+    return () => window.removeEventListener("resize", syncViewportWidth);
+  }, []);
+
+  useEffect(() => {
+    if (isDraftDrawerResizeEnabled || !isDraftDrawerResizing) return;
+    draftDrawerResizeStateRef.current = null;
+    setIsDraftDrawerResizing(false);
+  }, [isDraftDrawerResizing, isDraftDrawerResizeEnabled]);
+
+  useEffect(() => {
+    if (!isDraftDrawerResizing || !isDraftDrawerResizeEnabled) return;
+
+    const handlePointerMove = (event: MouseEvent) => {
+      const resizeState = draftDrawerResizeStateRef.current;
+      if (!resizeState) return;
+      const nextWidth = clampDraftDrawerWidth(resizeState.startWidth + (resizeState.startX - event.clientX));
+      setDraftDrawerWidth(nextWidth);
+    };
+
+    const stopResize = () => {
+      draftDrawerResizeStateRef.current = null;
+      setIsDraftDrawerResizing(false);
+    };
+
+    document.body.classList.add("draft-drawer-resizing");
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("mouseup", stopResize);
+    window.addEventListener("mouseleave", stopResize);
+
+    return () => {
+      document.body.classList.remove("draft-drawer-resizing");
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("mouseup", stopResize);
+      window.removeEventListener("mouseleave", stopResize);
+    };
+  }, [isDraftDrawerResizing]);
 
   const applyTurnResult = (result: PersonalChatTurnResult, options: TurnApplyOptions) => {
     setSelectedSessionUid(result.session.session_uid);
@@ -710,8 +827,25 @@ export function PersonalAgentApp() {
           setDraftsOpen(false);
           setDraftToOpenUid(undefined);
         }}
-        width={860}
+        width={effectiveDraftDrawerWidth}
+        rootClassName={isDraftDrawerResizing ? "drafts-drawer drafts-drawer-active-resize" : "drafts-drawer"}
       >
+        {/* 独立保留的产品能力：当前草稿抽屉支持手动调宽，不应被样式收尾类任务顺手移除。 */}
+        {isDraftDrawerResizeEnabled ? (
+          <div
+            className="drawer-resize-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整当前草稿窗口宽度"
+            aria-valuemin={effectiveDraftDrawerMinWidth}
+            aria-valuemax={effectiveDraftDrawerMaxWidth}
+            aria-valuenow={effectiveDraftDrawerWidth}
+            tabIndex={0}
+            onMouseDown={startDraftDrawerResize}
+            onDoubleClick={resetDraftDrawerWidth}
+            onKeyDown={handleDraftDrawerResizeKeyDown}
+          />
+        ) : null}
         <ArtifactDraftsPanel
           openDraftUid={draftToOpenUid}
           activeTab={draftPanelTab}

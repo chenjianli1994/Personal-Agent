@@ -480,9 +480,56 @@
 
 .artifact-layout {
   display: grid;
-  grid-template-columns: clamp(220px, 24vw, 300px) minmax(0, 1fr);
+  grid-template-columns: clamp(260px, 28vw, 360px) minmax(0, 1fr);
   gap: 16px;
   min-height: 520px;
+}
+
+.drafts-drawer .ant-drawer-body {
+  position: relative;
+  padding-left: 18px;
+}
+
+.drawer-resize-handle {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 14px;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.drawer-resize-handle::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 50%;
+  width: 4px;
+  height: 72px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(77, 118, 168, 0.18), rgba(77, 118, 168, 0.48), rgba(77, 118, 168, 0.18));
+  transform: translateY(-50%);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.drawer-resize-handle:hover::before,
+.drafts-drawer-active-resize .drawer-resize-handle::before {
+  background: linear-gradient(180deg, rgba(77, 118, 168, 0.34), rgba(77, 118, 168, 0.82), rgba(77, 118, 168, 0.34));
+  box-shadow: 0 0 0 4px rgba(77, 118, 168, 0.08);
+}
+
+.drawer-resize-handle:focus-visible {
+  outline: none;
+}
+
+.drawer-resize-handle:focus-visible::before {
+  background: linear-gradient(180deg, rgba(77, 118, 168, 0.42), rgba(77, 118, 168, 0.92), rgba(77, 118, 168, 0.42));
+  box-shadow: 0 0 0 5px rgba(77, 118, 168, 0.16);
+}
+
+body.draft-drawer-resizing,
+body.draft-drawer-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .sources-list {
