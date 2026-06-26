@@ -3177,9 +3177,9 @@ function draftTaskDisplayCode(draft: Pick<PersonalArtifactDraft, "task_display_c
 }
 
 function draftCandidateLabel(draft: Pick<PersonalArtifactDraft, "task_uid" | "candidate_index" | "stage_candidate_count" | "current_revision">) {
-  if (!draft.task_uid || !draft.candidate_index) return `鐗堟湰 v${draft.current_revision}`;
+  if (!draft.task_uid || !draft.candidate_index) return `版本 v${draft.current_revision}`;
   const total = draft.stage_candidate_count || draft.candidate_index;
-  return `鍊欓€?${draft.candidate_index}/${total} 路 鐗堟湰 v${draft.current_revision}`;
+  return `候选 ${draft.candidate_index}/${total} · 版本 v${draft.current_revision}`;
 }
 
 function buildDraftTaskGroups(drafts: PersonalArtifactDraft[]): DraftTaskGroup[] {
