@@ -480,7 +480,7 @@
 
 .artifact-layout {
   display: grid;
-  grid-template-columns: clamp(240px, 26vw, 320px) minmax(0, 1fr);
+  grid-template-columns: clamp(220px, 24vw, 300px) minmax(0, 1fr);
   gap: 16px;
   min-height: 520px;
 }
@@ -507,6 +507,16 @@
   gap: 14px;
 }
 
+.artifact-scope-summary {
+  padding: 10px 12px;
+  border: 1px solid #dce8f3;
+  border-radius: 8px;
+  background: #f8fbfe;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .artifact-task-group {
   display: flex;
   flex-direction: column;
@@ -517,6 +527,15 @@
   min-width: 0;
   padding-bottom: 4px;
   border-bottom: 1px solid #e4edf5;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.artifact-task-group-summary {
+  display: block;
+  color: var(--pa-text-muted);
+  font-size: 12px;
 }
 
 .artifact-stage-group {
@@ -527,6 +546,8 @@
 
 .artifact-stage-group-title {
   font-size: 12px;
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .artifact-candidate-list {
@@ -543,6 +564,8 @@
 
 .artifact-candidate-label {
   font-size: 12px;
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .source-item {
@@ -628,6 +651,14 @@
   align-items: center;
 }
 
+.artifact-card-heading {
+  min-width: 0;
+}
+
+.artifact-card-heading .ant-typography {
+  min-width: 0;
+}
+
 .artifact-draft-meta,
 .artifact-draft-status {
   min-width: 0;
@@ -656,6 +687,34 @@
   border: 1px solid #dbe5ee;
   border-radius: 10px;
   background: #f8fbff;
+  overflow-wrap: anywhere;
+}
+
+.artifact-relationship-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.artifact-relationship-grid-compact {
+  margin-top: 2px;
+}
+
+.artifact-relationship-row {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #dce8f3;
+  border-radius: 8px;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.artifact-relationship-label,
+.artifact-relationship-value {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .artifact-toolbar {
@@ -1377,5 +1436,9 @@
     display: flex;
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .artifact-relationship-grid {
+    grid-template-columns: 1fr;
   }
 }

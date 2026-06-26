@@ -28,6 +28,7 @@ import { BookOutlined, BranchesOutlined, BulbOutlined, CheckCircleOutlined, Clou
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { personalAgentApi } from "./api";
+import { ApiError } from "../api/client";
 import { ChatPanel } from "./ChatPanel";
 import type { ComposerAttachment, LocalMessage } from "./ChatPanel";
 import { DiffView } from "./DiffView";
@@ -52,6 +53,7 @@ import type {
   PendingStateKey,
   PendingVisualState,
   PersonalArtifactDraft,
+  PersonalArtifactDraftManagementImpact,
   PersonalCodebaseConfig,
   PersonalDevTask,
   PersonalInputSource,
@@ -69,6 +71,7 @@ import type {
 import "../styles/personal-agent.css";
 
 type DraftReviewTab = "preview" | "revise" | "versions" | "quality";
+type DraftFilterMode = "all" | "session" | "task" | "unlinked" | "trash";
 const NEW_SESSION_KEY = "__new_session__";
 
 type ChatTurnVariables = {
@@ -155,7 +158,7 @@ export function PersonalAgentApp() {
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [draftToOpenUid, setDraftToOpenUid] = useState<string>();
   const [draftPanelTab, setDraftPanelTab] = useState<"create" | "current">("create");
-  const [draftFilterMode, setDraftFilterMode] = useState<"all" | "session" | "task">("session");
+  const [draftFilterMode, setDraftFilterMode] = useState<DraftFilterMode>("session");
   const [draftFilterTaskUid, setDraftFilterTaskUid] = useState<string>();
   const [focusedTaskUid, setFocusedTaskUid] = useState<string>();
   const [renamingSession, setRenamingSession] = useState<PersonalSession>();
@@ -1215,15 +1218,15 @@ function ArtifactDraftsPanel({
   onTabChange: (value: "create" | "current") => void;
   selectedSessionUid?: string;
   currentTask?: PersonalDevTask;
-  filterMode: "all" | "session" | "task";
-  onFilterModeChange: (value: "all" | "session" | "task") => void;
+  filterMode: DraftFilterMode;
+  onFilterModeChange: (value: DraftFilterMode) => void;
   filterTaskUid?: string;
   onFilterTaskUidChange: (value?: string) => void;
   onOpenTask?: (taskUid: string, sessionUid?: string) => void;
   onContinueTask?: (taskUid: string, sessionUid?: string) => void;
   onFocusTaskDrafts?: (taskUid: string) => void;
 }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const showError = useMutationErrorHandler();
   const queryClient = useQueryClient();
   const [draftTitle, setDraftTitle] = useState("");
@@ -1239,23 +1242,29 @@ function ArtifactDraftsPanel({
   const [exportFormat, setExportFormat] = useState("");
   const [compareRevisionIndex, setCompareRevisionIndex] = useState<number>();
   const [manualDownload, setManualDownload] = useState<{ url: string; fileName: string } | null>(null);
+  const [selectedDraftUids, setSelectedDraftUids] = useState<string[]>([]);
+  const [draftUidsPendingRemoval, setDraftUidsPendingRemoval] = useState<string[]>([]);
   const draftTaskUid = filterMode === "task" ? filterTaskUid || "" : "";
-  const draftSessionUid = filterMode === "session" ? selectedSessionUid || "" : "";
+  const draftSessionUid = filterMode === "session" || filterMode === "unlinked" ? selectedSessionUid || "" : "";
+  const isTrashMode = filterMode === "trash";
+  const draftStatusFilter = isTrashMode ? "deleted" : "active_like";
 
   const draftsQuery = useQuery({
-    queryKey: ["personal-drafts", draftSessionUid, draftTaskUid, filterMode],
-    queryFn: () => personalAgentApi.draftList(draftSessionUid || undefined, draftTaskUid || undefined),
+    queryKey: ["personal-drafts", draftSessionUid, draftTaskUid, filterMode, draftStatusFilter],
+    queryFn: () => personalAgentApi.draftList(draftSessionUid || undefined, draftTaskUid || undefined, draftStatusFilter),
     retry: false
   });
   const sourcesQuery = useQuery({ queryKey: ["personal-sources"], queryFn: personalAgentApi.sources, retry: false });
-  const drafts = draftsQuery.data ?? [];
+  const draftList = draftsQuery.data ?? [];
+  const drafts = filterMode === "unlinked" ? draftList.filter((item) => !item.task_uid) : draftList;
   const taskGroups = buildDraftTaskGroups(drafts);
+  const draftScopeSummary = buildDraftScopeSummary(drafts);
   const activeDraft = drafts.find((item) => item.is_active);
   const selectedDraftSummary = drafts.find((item) => item.draft_uid === selectedDraftUid) ?? activeDraft ?? drafts[0];
   const draftDetailQuery = useQuery({
-    queryKey: ["personal-draft", selectedDraftSummary?.draft_uid],
-    queryFn: () => personalAgentApi.draftDetail(selectedDraftSummary!.draft_uid),
-    enabled: Boolean(selectedDraftSummary?.draft_uid),
+    queryKey: ["personal-draft", selectedDraftSummary?.draft_uid, isTrashMode],
+    queryFn: () => personalAgentApi.draftDetail(selectedDraftSummary!.draft_uid, isTrashMode),
+    enabled: Boolean(selectedDraftSummary?.draft_uid) && !draftUidsPendingRemoval.includes(selectedDraftSummary?.draft_uid || ""),
     retry: false
   });
   const draftDetail = draftDetailQuery.data ?? selectedDraftSummary;
@@ -1287,6 +1296,20 @@ function ArtifactDraftsPanel({
   }, [filterTaskUid, filterMode, onFilterModeChange, selectedSessionUid]);
 
   useEffect(() => {
+    if (filterMode === "unlinked") {
+      onFilterTaskUidChange(undefined);
+    }
+  }, [filterMode, onFilterTaskUidChange]);
+
+  useEffect(() => {
+    setSelectedDraftUids((items) => items.filter((draftUid) => drafts.some((draft) => draft.draft_uid === draftUid)));
+  }, [drafts]);
+
+  useEffect(() => {
+    setDraftUidsPendingRemoval((items) => items.filter((draftUid) => drafts.some((draft) => draft.draft_uid === draftUid)));
+  }, [drafts]);
+
+  useEffect(() => {
     if (draftDetail?.content !== undefined) {
       setRevisionContent(draftDetail.content);
       setSelectedRevisionIndex(undefined);
@@ -1296,8 +1319,18 @@ function ArtifactDraftsPanel({
     }
   }, [draftDetail?.draft_uid, draftDetail?.current_revision, draftDetail?.content]);
 
-  const refreshDrafts = (draft?: PersonalArtifactDraft) => {
+  useEffect(() => {
+    if (isTrashMode && reviewTab === "revise") {
+      setReviewTab("preview");
+    }
+  }, [isTrashMode, reviewTab]);
+
+  const refreshAllDraftLists = () => {
     queryClient.invalidateQueries({ queryKey: ["personal-drafts"] });
+  };
+
+  const refreshDrafts = (draft?: PersonalArtifactDraft) => {
+    refreshAllDraftLists();
     if (draft?.draft_uid) {
       setSelectedDraftUid(draft.draft_uid);
       setReviewTab("preview");
@@ -1305,6 +1338,32 @@ function ArtifactDraftsPanel({
       setCompareRevisionIndex(undefined);
       queryClient.setQueryData(["personal-draft", draft.draft_uid], draft);
     }
+  };
+
+  const removeDraftFromVisibleCaches = (draftUid: string) => {
+    queryClient.setQueriesData(
+      { queryKey: ["personal-drafts"] },
+      (cached: PersonalArtifactDraft[] | undefined) => (cached ?? []).filter((draft) => draft.draft_uid !== draftUid),
+    );
+  };
+
+  const clearDraftSelection = (draftUid: string) => {
+    setSelectedDraftUids((items) => items.filter((item) => item !== draftUid));
+    if (selectedDraftUid === draftUid) {
+      setSelectedDraftUid(undefined);
+      setSelectedRevisionIndex(undefined);
+      setCompareRevisionIndex(undefined);
+      setManualDownload(null);
+    }
+  };
+
+  const markDraftPendingRemoval = (draftUid: string, pending: boolean) => {
+    setDraftUidsPendingRemoval((items) => {
+      if (pending) {
+        return items.includes(draftUid) ? items : [...items, draftUid];
+      }
+      return items.filter((item) => item !== draftUid);
+    });
   };
 
   const createDraft = useMutation({
@@ -1342,7 +1401,7 @@ function ArtifactDraftsPanel({
     mutationFn: personalAgentApi.activateDraft,
     onSuccess: (draft) => {
       refreshDrafts(draft);
-      message.success("已设为当前草稿。");
+      message.success("已设为会话当前草稿。");
     },
     onError: showError
   });
@@ -1409,6 +1468,35 @@ function ArtifactDraftsPanel({
     },
     onError: showError
   });
+  const restoreDraft = useMutation({
+    mutationFn: (draftUid: string) => personalAgentApi.restoreDraft(draftUid),
+    onSuccess: (result, draftUid) => {
+      clearDraftSelection(draftUid);
+      refreshAllDraftLists();
+      message.success("已恢复草稿。");
+      queryClient.setQueryData(["personal-draft", result.draft.draft_uid, false], result.draft);
+    },
+    onError: showError
+  });
+  const trashDraft = useMutation({
+    mutationFn: ({ draftUid, confirmImpact }: { draftUid: string; confirmImpact?: boolean }) =>
+      personalAgentApi.trashDraft(draftUid, { confirm_impact: confirmImpact, reason: "用户移入回收站" }),
+    onSuccess: (_result, variables) => {
+      removeDraftFromVisibleCaches(variables.draftUid);
+      clearDraftSelection(variables.draftUid);
+      markDraftPendingRemoval(variables.draftUid, false);
+      refreshAllDraftLists();
+      message.success("已移入回收站。");
+    },
+    onError: (error, variables) => {
+      const apiError = error instanceof ApiError ? error : undefined;
+      if (apiError?.status === 409) {
+        return;
+      }
+      markDraftPendingRemoval(variables.draftUid, false);
+      showError(error);
+    }
+  });
   const exportOptions = draftDetail ? exportFormatOptionsForDraft(draftDetail) : [];
   const compareRevision = draftDetail?.revisions?.find((item) => item.revision_index === compareRevisionIndex);
   const compareText = draftDetail && compareRevision ? buildLineDiff(compareRevision.content, draftDetail.content || "") : "";
@@ -1416,11 +1504,152 @@ function ArtifactDraftsPanel({
   const qualityFailures = draftDetail ? qualityFailureSummary(draftDetail) : [];
   const canContinueTask = draftDetail ? canContinueDraftTask(draftDetail) : false;
   const taskFilterLabel = filteredTaskDraft ? draftTaskDisplayCode(filteredTaskDraft) : shortId(draftTaskUid);
+  const selectedEligibleTrashCount = selectedDraftUids.filter((draftUid) => {
+    const draft = drafts.find((item) => item.draft_uid === draftUid);
+    return Boolean(draft && canBulkTrashDraft(draft));
+  }).length;
+
+  const performTrashDraft = async (draft: PersonalArtifactDraft, confirmImpact = false) => {
+    markDraftPendingRemoval(draft.draft_uid, true);
+    try {
+      await trashDraft.mutateAsync({ draftUid: draft.draft_uid, confirmImpact });
+    } catch (error) {
+      const apiError = error instanceof ApiError ? error : undefined;
+      const detail = asRecord(apiError?.detail);
+      const impact = asDraftManagementImpact(detail.impact);
+      if (apiError?.status === 409 && detail.reason === "current_stage_candidate_requires_confirmation") {
+        markDraftPendingRemoval(draft.draft_uid, false);
+        modal.confirm({
+          title: "确认移除当前采用候选？",
+          okText: "仍然移入回收站",
+          okButtonProps: { danger: true },
+          cancelText: "取消",
+          content: (
+            <Space direction="vertical" size={8}>
+              <Typography.Text>
+                {formatDraftTrashImpactSummary(draft, impact)}
+              </Typography.Text>
+              <Typography.Text type="secondary">
+                {formatDraftTrashImpactDetail(draft, impact)}
+              </Typography.Text>
+              {impact.was_session_active ? (
+                <Typography.Text type="secondary">
+                  这份草稿也是当前会话草稿，移入回收站后当前会话将不再指向它。
+                </Typography.Text>
+              ) : null}
+            </Space>
+          ),
+          onOk: () => performTrashDraft(draft, true)
+        });
+        return;
+      }
+      markDraftPendingRemoval(draft.draft_uid, false);
+      throw error;
+    }
+  };
+
+  const confirmTrashDraft = (draft: PersonalArtifactDraft) => {
+    modal.confirm({
+      title: "移入回收站",
+      okText: "移入回收站",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      content: (
+        <Space direction="vertical" size={8}>
+          <Typography.Text>这份草稿会从默认列表隐藏，可在回收站恢复，版本历史会保留。</Typography.Text>
+          {draft.is_active ? (
+            <Typography.Text type="secondary">
+              它也是当前会话草稿，移入回收站后当前会话不再指向这份草稿。
+            </Typography.Text>
+          ) : null}
+        </Space>
+      ),
+      onOk: () => performTrashDraft(draft)
+    });
+  };
+
+  const confirmRestoreDraft = (draft: PersonalArtifactDraft) => {
+    modal.confirm({
+      title: "恢复草稿",
+      okText: "恢复",
+      cancelText: "取消",
+      content: "恢复后这份草稿会回到默认列表，但不会自动设为会话当前草稿。",
+      onOk: () => restoreDraft.mutateAsync(draft.draft_uid)
+    });
+  };
+
+  const handleBatchTrash = () => {
+    const candidates = drafts.filter((draft) => selectedDraftUids.includes(draft.draft_uid) && canBulkTrashDraft(draft));
+    if (!candidates.length) return;
+    modal.confirm({
+      title: "批量移入回收站",
+      okText: "移入回收站",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      content: `将把 ${candidates.length} 份历史候选或未关联草稿移入回收站。当前采用候选不会参与本次批量操作。`,
+      onOk: async () => {
+        for (const draft of candidates) {
+          await trashDraft.mutateAsync({ draftUid: draft.draft_uid });
+        }
+        setSelectedDraftUids([]);
+      }
+    });
+  };
 
   const selectDraft = (draftUid: string) => {
     setSelectedDraftUid(draftUid);
     setSelectedRevisionIndex(undefined);
     setReviewTab("preview");
+  };
+
+  const toggleDraftSelection = (draftUid: string, checked: boolean) => {
+    setSelectedDraftUids((items) => {
+      if (checked) {
+        return items.includes(draftUid) ? items : [...items, draftUid];
+      }
+      return items.filter((item) => item !== draftUid);
+    });
+  };
+
+  const buildDraftActionItems = (draft: PersonalArtifactDraft) => {
+    if (isTrashMode) {
+      return [
+        {
+          key: "restore",
+          label: "恢复",
+          icon: <ReloadOutlined />,
+          onClick: () => confirmRestoreDraft(draft),
+        },
+      ];
+    }
+    return [
+      {
+        key: "open",
+        label: "打开",
+        icon: <FileTextOutlined />,
+        onClick: () => openDraftFile.mutate(draft.draft_uid),
+      },
+      {
+        key: "download",
+        label: "下载",
+        icon: <CloudDownloadOutlined />,
+        onClick: () => exportDraft.mutate({ draftUid: draft.draft_uid, format: defaultExportFormat(draft) }),
+      },
+      {
+        key: "activate",
+        label: "设为会话当前草稿",
+        icon: <PlayCircleOutlined />,
+        disabled: draft.is_active,
+        onClick: () => activateDraft.mutate(draft.draft_uid),
+      },
+      {
+        key: "trash",
+        label: "移入回收站",
+        icon: <DeleteOutlined />,
+        danger: true,
+        onClick: () => confirmTrashDraft(draft),
+      },
+    ];
   };
 
   const renderDraftCard = (item: PersonalArtifactDraft) => (
@@ -1431,23 +1660,49 @@ function ArtifactDraftsPanel({
     >
       <div className="artifact-draft-card">
         <div className="artifact-draft-card-header">
-          <Typography.Text strong ellipsis title={item.title}>
-            {item.title}
-          </Typography.Text>
-          {item.task_uid
-            ? item.is_stage_current_candidate
-              ? <Tag color="green">当前采用</Tag>
-              : <Tag>历史候选</Tag>
-            : item.is_active
-              ? <Tag color="green">当前</Tag>
-              : null}
+          <Space size={8} className="artifact-card-heading">
+            {!isTrashMode && canBulkTrashDraft(item) ? (
+              <Checkbox
+                checked={selectedDraftUids.includes(item.draft_uid)}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => toggleDraftSelection(item.draft_uid, event.target.checked)}
+              />
+            ) : null}
+            <Typography.Text strong ellipsis title={item.title}>
+              {item.title}
+            </Typography.Text>
+          </Space>
+          <Space size={6}>
+            <Tag color={draftTaskStateColor(item)}>
+              {draftTaskStateLabel(item)}
+            </Tag>
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: buildDraftActionItems(item),
+                onClick: ({ key, domEvent }) => {
+                  domEvent.stopPropagation();
+                  const action = buildDraftActionItems(item).find((candidate) => candidate.key === key);
+                  action?.onClick?.();
+                },
+              }}
+            >
+              <Button
+                size="small"
+                type="text"
+                icon={<MoreOutlined />}
+                onClick={(event) => event.stopPropagation()}
+              />
+            </Dropdown>
+          </Space>
         </div>
         <Space size={4} wrap className="artifact-draft-meta">
           <Tag>{documentLabel(item.document_type)}</Tag>
           <Tag>{draftCandidateLabel(item)}</Tag>
         </Space>
         <Space size={4} wrap className="artifact-draft-status">
-          {item.task_uid ? <Tag color="blue">{draftTaskDisplayCode(item)}</Tag> : <Tag>未关联任务</Tag>}
+          {item.task_uid ? <Tag color="blue">{draftTaskDisplayCode(item)}</Tag> : <Tag>未关联草稿</Tag>}
+          {item.status === "deleted" ? <Tag color="default">回收站</Tag> : null}
           {item.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
           {item.lineage_stale ? <Tag color="orange">上游已更新</Tag> : null}
         </Space>
@@ -1519,37 +1774,70 @@ function ArtifactDraftsPanel({
                         { value: "all", label: "全部" },
                         { value: "session", label: "当前会话", disabled: !selectedSessionUid },
                         { value: "task", label: "任务草稿", disabled: !filterTaskUid && !currentTask?.task_uid },
+                        { value: "unlinked", label: "未关联草稿" },
+                        { value: "trash", label: "回收站" },
                       ]}
                     />
                     <Typography.Text type="secondary" className="personal-small">
                       {filterMode === "task"
                         ? `仅显示 ${taskFilterLabel} 的草稿`
+                        : filterMode === "trash"
+                          ? "仅显示已移入回收站的草稿"
+                        : filterMode === "unlinked"
+                          ? "仅显示未关联草稿"
                         : filterMode === "session"
                           ? "仅显示当前会话草稿"
                           : "显示全部草稿"}
                     </Typography.Text>
+                    {!isTrashMode && selectedEligibleTrashCount ? (
+                      <Space size={8} wrap>
+                        <Typography.Text className="personal-small">
+                          已选 {selectedEligibleTrashCount} 份可批量移入回收站的草稿
+                        </Typography.Text>
+                        <Button size="small" danger onClick={handleBatchTrash}>
+                          批量移入回收站
+                        </Button>
+                        <Button size="small" onClick={() => setSelectedDraftUids([])}>
+                          清空选择
+                        </Button>
+                      </Space>
+                    ) : null}
+                    <div className="artifact-scope-summary">
+                      <Typography.Text strong>当前范围：</Typography.Text>
+                      <Typography.Text>
+                        {draftScopeSummary}
+                      </Typography.Text>
+                    </div>
                     {taskGroups.length ? (
                       <div className="artifact-group-list">
                         {taskGroups.map((group) => (
                           <div key={group.key} className="artifact-task-group">
                             <div className="artifact-task-group-header">
-                              <Space wrap size={6}>
-                                {group.isUnlinked ? <Tag>未关联任务</Tag> : <Tag color="blue">{group.taskDisplayCode || shortId(group.taskUid)}</Tag>}
+                              <Space wrap size={6} className="full-width">
+                                {group.isUnlinked ? <Tag>未关联草稿</Tag> : <Tag color="blue">{group.taskDisplayCode || shortId(group.taskUid)}</Tag>}
                                 {filterMode === "all" && group.sessionUid ? (
                                   <Typography.Text type="secondary" className="personal-small">
                                     会话 {shortId(group.sessionUid)}
                                   </Typography.Text>
                                 ) : null}
-                                <Typography.Text strong ellipsis={{ tooltip: group.taskTitle || "未关联任务" }}>
-                                  {group.taskTitle || "未关联任务"}
+                                <Typography.Text strong ellipsis={{ tooltip: group.taskTitle || "未关联草稿" }}>
+                                  {group.isUnlinked ? "未关联草稿" : `${group.taskDisplayCode || shortId(group.taskUid)} · 任务草稿线`}
                                 </Typography.Text>
                                 {group.taskStatus ? <Tag>{group.taskStatus}</Tag> : null}
                               </Space>
+                              {!group.isUnlinked && group.taskTitle ? (
+                                <Typography.Text ellipsis={{ tooltip: group.taskTitle }}>
+                                  {group.taskTitle}
+                                </Typography.Text>
+                              ) : null}
+                              <Typography.Text className="artifact-task-group-summary">
+                                {taskGroupSummary(group)}
+                              </Typography.Text>
                             </div>
                             {group.stages.map((stage) => (
                               <div key={stage.key} className="artifact-stage-group">
                                 <Typography.Text type="secondary" className="artifact-stage-group-title">
-                                  {documentLabel(stage.documentType)}
+                                  {group.isUnlinked ? `${documentLabel(stage.documentType)} · ${stage.drafts.length} 份草稿 · 仅版本语义` : stageGroupSummary(stage)}
                                 </Typography.Text>
                                 <div className="artifact-candidate-list">
                                   {stage.candidates.map((candidate) => (
@@ -1576,24 +1864,26 @@ function ArtifactDraftsPanel({
                     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择草稿查看内容" />
                   ) : (
                     <Space direction="vertical" size={10} className="full-width">
-                      <div className="artifact-detail-header">
-                        <div className="artifact-detail-title">
-                          <Typography.Title level={5}>{draftDetail.title}</Typography.Title>
-                          <Space size={6} wrap>
-                            <Tag>{documentLabel(draftDetail.document_type)}</Tag>
+                        <div className="artifact-detail-header">
+                          <div className="artifact-detail-title">
+                            <Typography.Title level={5}>{draftDetail.title}</Typography.Title>
+                            <Space size={6} wrap>
+                              <Tag>{documentLabel(draftDetail.document_type)}</Tag>
                             <Tag>{draftCandidateLabel(draftDetail)}</Tag>
                             {draftDetail.status === "quality_failed" ? <Tag color="red">质量未通过</Tag> : null}
                             {draftDetail.lineage_stale ? <Tag color="orange">上游已更新</Tag> : null}
                           </Space>
                         </div>
-                        {!draftDetail.is_active ? (
-                          <Button
-                            size="small"
-                            loading={activateDraft.isPending}
-                            onClick={() => activateDraft.mutate(draftDetail.draft_uid)}
-                          >
-                            设为当前
-                          </Button>
+                        {!isTrashMode && !draftDetail.is_active ? (
+                          <Tooltip title="只会把这份草稿设为当前会话下该文档类型的当前草稿，不会改变任务阶段当前采用候选。">
+                            <Button
+                              size="small"
+                              loading={activateDraft.isPending}
+                              onClick={() => activateDraft.mutate(draftDetail.draft_uid)}
+                            >
+                              设为会话当前草稿
+                            </Button>
+                          </Tooltip>
                         ) : null}
                       </div>
                       {draftDetail.task_uid ? (
@@ -1605,21 +1895,42 @@ function ArtifactDraftsPanel({
                               {draftDetail.task_status ? <Tag>{draftDetail.task_status}</Tag> : null}
                               {draftDetail.task_current_step ? <Tag>{documentLabel(draftDetail.task_current_step)}</Tag> : null}
                               <Tag>{draftCandidateLabel(draftDetail)}</Tag>
-                              {draftDetail.is_stage_current_candidate ? <Tag color="green">当前采用</Tag> : <Tag>历史候选</Tag>}
+                              {draftDetail.is_stage_current_candidate ? <Tag color="green">当前采用候选</Tag> : <Tag>历史候选</Tag>}
+                              {draftDetail.is_active ? <Tag color="processing">会话当前草稿</Tag> : null}
+                            </Space>
+                            <div className="artifact-relationship-grid">
+                              {draftRelationshipFacts(draftDetail).map((fact) => (
+                                <div key={fact.key} className="artifact-relationship-row">
+                                  <Typography.Text type="secondary" className="artifact-relationship-label">
+                                    {fact.label}
+                                  </Typography.Text>
+                                  <Typography.Text className="artifact-relationship-value">
+                                    {fact.value}
+                                  </Typography.Text>
+                                </div>
+                              ))}
+                            </div>
+                            <Space direction="vertical" size={4} className="full-width">
+                              <Typography.Text>
+                                {draftRelationshipSummary(draftDetail)}
+                              </Typography.Text>
+                              <Typography.Text type="secondary">
+                                {draftRelationshipDetail(draftDetail)}
+                              </Typography.Text>
                             </Space>
                             <Space wrap size={8}>
                               <Button size="small" onClick={() => onOpenTask?.(draftDetail.task_uid!, draftDetail.session_uid)}>
                                 查看任务
                               </Button>
-                              <Tooltip title={canContinueTask ? undefined : "该任务已结束，不能继续推进"}>
+                              <Tooltip title={isTrashMode ? "回收站草稿不能直接继续推进任务" : canContinueTask ? undefined : "该任务已结束，不能继续推进"}>
                                 <span>
                                   <Button
                                     size="small"
                                     type="primary"
-                                    disabled={!canContinueTask}
+                                    disabled={isTrashMode || !canContinueTask}
                                     onClick={() => onContinueTask?.(draftDetail.task_uid!, draftDetail.session_uid)}
                                   >
-                                    继续推进
+                                    继续推进任务
                                   </Button>
                                 </span>
                               </Tooltip>
@@ -1640,34 +1951,55 @@ function ArtifactDraftsPanel({
                         <Alert
                           type="info"
                           showIcon
-                          message="未关联任务"
-                          description="这份草稿可能来自手动创建或旧流程，不属于当前开发任务线。"
+                          message="未关联草稿"
+                          description={(
+                            <Space direction="vertical" size={8} className="full-width">
+                              <div className="artifact-relationship-grid artifact-relationship-grid-compact">
+                                {draftRelationshipFacts(draftDetail).map((fact) => (
+                                  <div key={fact.key} className="artifact-relationship-row">
+                                    <Typography.Text type="secondary" className="artifact-relationship-label">
+                                      {fact.label}
+                                    </Typography.Text>
+                                    <Typography.Text className="artifact-relationship-value">
+                                      {fact.value}
+                                    </Typography.Text>
+                                  </div>
+                                ))}
+                              </div>
+                              <Typography.Text>{draftRelationshipSummary(draftDetail)}</Typography.Text>
+                              <Typography.Text type="secondary">{draftRelationshipDetail(draftDetail)}</Typography.Text>
+                            </Space>
+                          )}
                         />
                       )}
                       <div className="artifact-toolbar">
                         <Space wrap size={8}>
-                          <span className="artifact-toolbar-label">导出格式</span>
-                          <Select
-                            className="artifact-export-select"
-                            value={exportFormat || undefined}
-                            options={exportOptions.map((item) => ({ value: item, label: item.toUpperCase() }))}
-                            onChange={setExportFormat}
-                          />
-                          <Button
-                            icon={<FileTextOutlined />}
-                            loading={openDraftFile.isPending}
-                            onClick={() => openDraftFile.mutate(draftDetail.draft_uid)}
-                          >
-                            打开
-                          </Button>
-                          <Button
-                            icon={<CloudDownloadOutlined />}
-                            loading={exportDraft.isPending}
-                            disabled={!exportFormat}
-                            onClick={() => exportDraft.mutate({ draftUid: draftDetail.draft_uid, format: exportFormat || defaultExportFormat(draftDetail) })}
-                          >
-                            下载
-                          </Button>
+                          {!isTrashMode ? (
+                            <>
+                              <span className="artifact-toolbar-label">导出格式</span>
+                              <Select
+                                className="artifact-export-select"
+                                value={exportFormat || undefined}
+                                options={exportOptions.map((item) => ({ value: item, label: item.toUpperCase() }))}
+                                onChange={setExportFormat}
+                              />
+                              <Button
+                                icon={<FileTextOutlined />}
+                                loading={openDraftFile.isPending}
+                                onClick={() => openDraftFile.mutate(draftDetail.draft_uid)}
+                              >
+                                打开
+                              </Button>
+                              <Button
+                                icon={<CloudDownloadOutlined />}
+                                loading={exportDraft.isPending}
+                                disabled={!exportFormat}
+                                onClick={() => exportDraft.mutate({ draftUid: draftDetail.draft_uid, format: exportFormat || defaultExportFormat(draftDetail) })}
+                              >
+                                下载
+                              </Button>
+                            </>
+                          ) : null}
                           <Button
                             icon={<CopyOutlined />}
                             onClick={() => {
@@ -1678,22 +2010,39 @@ function ArtifactDraftsPanel({
                             复制
                           </Button>
                         </Space>
-                        <Popconfirm
-                          title="重新生成草稿"
-                          description={regenerateDraftDescription(draftDetail)}
-                          okText="重新生成"
-                          cancelText="取消"
-                          onConfirm={() => regenerateDraft.mutate(draftDetail)}
-                        >
-                          <Button
-                            icon={<ReloadOutlined />}
-                            loading={regenerateDraft.isPending}
-                          >
-                            重新生成
-                          </Button>
-                        </Popconfirm>
+                        <Space wrap size={8}>
+                          {isTrashMode ? (
+                            <Button
+                              icon={<ReloadOutlined />}
+                              loading={restoreDraft.isPending}
+                              onClick={() => confirmRestoreDraft(draftDetail)}
+                            >
+                              恢复草稿
+                            </Button>
+                          ) : (
+                            <>
+                              <Button danger icon={<DeleteOutlined />} loading={trashDraft.isPending} onClick={() => confirmTrashDraft(draftDetail)}>
+                                移入回收站
+                              </Button>
+                              <Popconfirm
+                                title="重新生成草稿"
+                                description={regenerateDraftDescription(draftDetail)}
+                                okText="重新生成"
+                                cancelText="取消"
+                                onConfirm={() => regenerateDraft.mutate(draftDetail)}
+                              >
+                                <Button
+                                  icon={<ReloadOutlined />}
+                                  loading={regenerateDraft.isPending}
+                                >
+                                  重新生成
+                                </Button>
+                              </Popconfirm>
+                            </>
+                          )}
+                        </Space>
                       </div>
-                      {manualDownload ? (
+                      {!isTrashMode && manualDownload ? (
                         <Typography.Link href={manualDownload.url} download={manualDownload.fileName}>
                           手动下载 {manualDownload.fileName}
                         </Typography.Link>
@@ -1752,7 +2101,7 @@ function ArtifactDraftsPanel({
                               </Space>
                             )
                           },
-                          {
+                          ...(!isTrashMode ? [{
                             key: "revise",
                             label: "修订",
                             children: (
@@ -1801,7 +2150,7 @@ function ArtifactDraftsPanel({
                                 </div>
                               </Space>
                             )
-                          },
+                          }] : []),
                           {
                             key: "versions",
                             label: "版本",
@@ -3152,6 +3501,7 @@ type DraftStageGroup = {
   stageIndex: number | null;
   drafts: PersonalArtifactDraft[];
   candidates: DraftCandidateGroup[];
+  currentCandidate?: PersonalArtifactDraft;
 };
 
 type DraftTaskGroup = {
@@ -3168,6 +3518,18 @@ type DraftTaskGroup = {
   stages: DraftStageGroup[];
 };
 
+type DraftScopeSummary = {
+  taskLineCount: number;
+  taskDraftCount: number;
+  unlinkedDraftCount: number;
+};
+
+type DraftRelationshipFact = {
+  key: string;
+  label: string;
+  value: string;
+};
+
 function taskDisplayCode(task?: Pick<PersonalDevTask, "display_code" | "task_uid">) {
   return task?.display_code || shortId(task?.task_uid || "");
 }
@@ -3182,6 +3544,125 @@ function draftCandidateLabel(draft: Pick<PersonalArtifactDraft, "task_uid" | "ca
   return `候选 ${draft.candidate_index}/${total} · 版本 v${draft.current_revision}`;
 }
 
+function buildDraftScopeSummary(drafts: PersonalArtifactDraft[]) {
+  const summary: DraftScopeSummary = {
+    taskLineCount: 0,
+    taskDraftCount: 0,
+    unlinkedDraftCount: 0,
+  };
+  const taskLineKeys = new Set<string>();
+  for (const draft of drafts) {
+    if (draft.task_uid) {
+      summary.taskDraftCount += 1;
+      taskLineKeys.add(`${draft.session_uid || "__no_session__"}:${draft.task_uid}`);
+    } else {
+      summary.unlinkedDraftCount += 1;
+    }
+  }
+  summary.taskLineCount = taskLineKeys.size;
+  return `${summary.taskLineCount} 条任务线，${summary.taskDraftCount} 份任务候选草稿，${summary.unlinkedDraftCount} 份未关联草稿。候选表示同一阶段的不同生成结果；版本表示单份草稿的内部修订。`;
+}
+
+function draftTaskStateLabel(draft: PersonalArtifactDraft) {
+  if (draft.status === "deleted") {
+    return "回收站草稿";
+  }
+  if (!draft.task_uid) {
+    return draft.is_active ? "会话当前草稿" : "未关联草稿";
+  }
+  if (draft.is_stage_current_candidate) {
+    return draft.status === "quality_failed" ? "当前采用候选 · 质量未通过" : "当前采用候选";
+  }
+  return "历史候选";
+}
+
+function draftTaskStateColor(draft: PersonalArtifactDraft) {
+  if (draft.status === "deleted") {
+    return "default";
+  }
+  if (!draft.task_uid) {
+    return draft.is_active ? "processing" : "default";
+  }
+  if (draft.is_stage_current_candidate) {
+    return draft.status === "quality_failed" ? "red" : "green";
+  }
+  return "default";
+}
+
+function stageGroupSummary(stage: DraftStageGroup) {
+  const parts = [`${stage.candidates.length} 个候选`];
+  if (stage.currentCandidate?.candidate_index) {
+    parts.push(`当前采用候选 ${stage.currentCandidate.candidate_index}`);
+  }
+  if (stage.currentCandidate?.status === "quality_failed") {
+    parts.push("质量未通过");
+  }
+  return `${documentLabel(stage.documentType)} · ${parts.join(" · ")}`;
+}
+
+function taskGroupSummary(group: DraftTaskGroup) {
+  if (group.isUnlinked) {
+    return `这些草稿不属于任何任务线，不会参与任务阶段候选比较。`;
+  }
+  const currentStage = group.drafts.find((draft) => draft.task_current_step)?.task_current_step || group.stages[0]?.documentType || "";
+  const parts = [group.taskStatus || "状态待确认"];
+  parts.push(currentStage ? `当前阶段：${documentLabel(currentStage)}` : "当前阶段待确认");
+  return parts.join(" · ");
+}
+
+function draftRelationshipSummary(draft: PersonalArtifactDraft) {
+  if (!draft.task_uid) {
+    return `这是一份未关联草稿 / 版本 v${draft.current_revision}。`;
+  }
+  const taskCode = draftTaskDisplayCode(draft);
+  const stageLabel = documentLabel(draft.document_type);
+  const candidateLabel = draft.candidate_index && draft.stage_candidate_count
+    ? `候选 ${draft.candidate_index}/${draft.stage_candidate_count}`
+    : "候选待确认";
+  return `这份文档属于 ${taskCode} / ${stageLabel} / ${candidateLabel} / 版本 v${draft.current_revision}。`;
+}
+
+function draftRelationshipDetail(draft: PersonalArtifactDraft) {
+  if (!draft.task_uid) {
+    return draft.is_active
+      ? "它不属于任何任务线，不会出现在任务列表，也不会参与任务阶段候选比较。它当前也是当前会话下该文档类型的当前草稿，仍可查看、导出和修订。"
+      : "它不属于任何任务线，不会出现在任务列表，也不会参与任务阶段候选比较。仍可查看、导出和修订。";
+  }
+  const sessionHint = draft.is_active
+    ? "它同时也是当前会话下该文档类型的当前草稿，但这不等同于任务阶段当前采用候选。"
+    : "";
+  if (draft.is_stage_current_candidate) {
+    return draft.status === "quality_failed"
+      ? `当前任务正在采用这份候选继续推进，但它尚未通过质量检查。${sessionHint}`.trim()
+      : `当前任务正在采用这份候选继续推进。${sessionHint}`.trim();
+  }
+  return `这是一份历史候选，可用于对比，但当前任务阶段并未采用它继续推进。${sessionHint}`.trim();
+}
+
+function draftRelationshipFacts(draft: PersonalArtifactDraft): DraftRelationshipFact[] {
+  if (!draft.task_uid) {
+    return [
+      { key: "identity", label: "草稿身份", value: "未关联草稿" },
+      { key: "version", label: "版本", value: `v${draft.current_revision}` },
+      { key: "task", label: "任务线", value: "不属于任何任务线" },
+      { key: "candidate", label: "候选关系", value: "不参与任务阶段候选比较" },
+      { key: "session", label: "会话状态", value: draft.is_active ? "会话当前草稿" : "独立草稿" },
+    ];
+  }
+  return [
+    { key: "task", label: "任务线", value: `${draftTaskDisplayCode(draft)} · ${draft.task_title || "未命名任务"}` },
+    { key: "stage", label: "阶段", value: documentLabel(draft.document_type) },
+    {
+      key: "candidate",
+      label: "候选关系",
+      value: `${draftCandidateLabel(draft)} · ${draft.is_stage_current_candidate ? "当前采用候选" : "历史候选"}`
+    },
+    { key: "version", label: "版本", value: `v${draft.current_revision}` },
+    { key: "quality", label: "质量状态", value: draft.status === "quality_failed" ? "质量未通过" : "当前无失败标记" },
+    { key: "session", label: "会话状态", value: draft.is_active ? "会话当前草稿" : "不是会话当前草稿" },
+  ];
+}
+
 function buildDraftTaskGroups(drafts: PersonalArtifactDraft[]): DraftTaskGroup[] {
   const taskOrder: string[] = [];
   const taskMap = new Map<string, DraftTaskGroup>();
@@ -3194,7 +3675,7 @@ function buildDraftTaskGroups(drafts: PersonalArtifactDraft[]): DraftTaskGroup[]
         taskUid: draft.task_uid || "",
         isUnlinked: !draft.task_uid,
         taskDisplayCode: draftTaskDisplayCode(draft),
-        taskTitle: draft.task_title || (!draft.task_uid ? "未关联任务" : ""),
+        taskTitle: draft.task_title || (!draft.task_uid ? "未关联草稿" : ""),
         taskStatus: draft.task_status || "",
         taskDisplayScope: draft.task_display_scope || "",
         taskSessionDisplayIndex: draft.task_session_display_index ?? null,
@@ -3243,6 +3724,7 @@ function buildDraftTaskGroups(drafts: PersonalArtifactDraft[]): DraftTaskGroup[]
           return {
             ...group,
             drafts: sortedDrafts,
+            currentCandidate: sortedDrafts.find((draft) => draft.is_stage_current_candidate),
             candidates: sortedDrafts.map((draft) => ({
               key: `${group.key}:${draft.draft_uid}`,
               label: draftCandidateLabel(draft),
@@ -3330,6 +3812,41 @@ function qualityFailureSummary(draft: PersonalArtifactDraft): string[] {
   if (failedChecks.length) return failedChecks.slice(0, 2);
 
   return ["质量检查未通过，请查看质量页。"];
+}
+
+function canBulkTrashDraft(draft: PersonalArtifactDraft) {
+  if (draft.status === "deleted") return false;
+  if (!draft.task_uid) return true;
+  return !draft.is_stage_current_candidate;
+}
+
+function formatDraftTrashImpactSummary(draft: PersonalArtifactDraft, impact: PersonalArtifactDraftManagementImpact) {
+  const taskCode = draft.task_uid ? draftTaskDisplayCode(draft) : "未关联草稿";
+  const stageLabel = documentLabel(impact.affected_document_type || draft.document_type);
+  return `这会把 ${taskCode} 的 ${stageLabel} 当前采用候选移入回收站。`;
+}
+
+function formatDraftTrashImpactDetail(draft: PersonalArtifactDraft, impact: PersonalArtifactDraftManagementImpact) {
+  if (impact.fallback_draft_uid) {
+    const fallbackLabel = impact.fallback_candidate_index ? `候选 ${impact.fallback_candidate_index}` : "其他候选";
+    const fallbackTitle = impact.fallback_title ? `“${impact.fallback_title}”` : "该候选";
+    return `确认后系统会改用 ${fallbackLabel} ${fallbackTitle} 继续作为该阶段的当前采用候选。`;
+  }
+  return `确认后，这个任务阶段将暂时没有当前采用候选，需要后续重新生成或恢复草稿。`;
+}
+
+function asDraftManagementImpact(value: unknown): PersonalArtifactDraftManagementImpact {
+  const record = asRecord(value);
+  return {
+    was_session_active: Boolean(record.was_session_active),
+    was_stage_current_candidate: Boolean(record.was_stage_current_candidate),
+    fallback_draft_uid: typeof record.fallback_draft_uid === "string" ? record.fallback_draft_uid : "",
+    fallback_candidate_index: typeof record.fallback_candidate_index === "number" ? record.fallback_candidate_index : null,
+    fallback_title: typeof record.fallback_title === "string" ? record.fallback_title : "",
+    affected_task_uid: typeof record.affected_task_uid === "string" ? record.affected_task_uid : "",
+    affected_document_type: typeof record.affected_document_type === "string" ? record.affected_document_type : "",
+    affected_session_uid: typeof record.affected_session_uid === "string" ? record.affected_session_uid : "",
+  };
 }
 
 

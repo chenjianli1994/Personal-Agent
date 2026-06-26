@@ -22,10 +22,14 @@ from personal_agent.core.utils import json_dumps, utc_now
 from .artifact_drafts import (
     activate_artifact_draft,
     create_artifact_draft,
+    DraftConflictError,
+    DraftStateError,
     get_artifact_content,
     get_artifact_draft,
     list_artifact_drafts,
     revise_artifact_draft_manual,
+    restore_artifact_draft,
+    trash_artifact_draft,
 )
 from .artifact_generation import (
     propose_personal_artifact,
@@ -234,6 +238,15 @@ class PersonalArtifactUnitTestRequest(BaseModel):
     task_uid: str = ""
     source_uids: list[str] = Field(default_factory=list)
     make_active: bool = True
+
+
+class PersonalArtifactDraftTrashRequest(BaseModel):
+    confirm_impact: bool = False
+    reason: str = ""
+
+
+class PersonalArtifactDraftRestoreRequest(BaseModel):
+    restore_status: str = ""
 
 
 class PersonalDevTaskStartRequest(BaseModel):
@@ -566,14 +579,22 @@ def register_personal_agent_routes(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/personal/drafts")
-    def personal_artifact_drafts(session_uid: str | None = None, task_uid: str | None = None) -> list[dict[str, Any]]:
+    def personal_artifact_drafts(
+        session_uid: str | None = None,
+        task_uid: str | None = None,
+        status: str = "",
+    ) -> list[dict[str, Any]]:
         _require_capability(context, "artifact_drafts")
-        return list_artifact_drafts(
-            context.db_path,
-            project_id=context.project_id,
-            session_uid=session_uid,
-            task_uid=task_uid,
-        )
+        try:
+            return list_artifact_drafts(
+                context.db_path,
+                project_id=context.project_id,
+                session_uid=session_uid,
+                task_uid=task_uid,
+                status_filter=status,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/personal/documents/propose")
     def personal_artifact_propose(req: PersonalArtifactProposeRequest) -> dict[str, Any]:
@@ -744,21 +765,30 @@ def register_personal_agent_routes(
             raise HTTPException(status_code=400, detail=detail) from exc
 
     @app.get("/api/personal/artifacts/drafts")
-    def personal_artifact_drafts_alias(session_uid: str | None = None) -> list[dict[str, Any]]:
+    def personal_artifact_drafts_alias(
+        session_uid: str | None = None,
+        task_uid: str | None = None,
+        status: str = "",
+    ) -> list[dict[str, Any]]:
         _require_capability(context, "artifact_drafts")
-        return list_artifact_drafts(context.db_path, project_id=context.project_id, session_uid=session_uid)
+        return personal_artifact_drafts(session_uid=session_uid, task_uid=task_uid, status=status)
 
     @app.get("/api/personal/drafts/{draft_uid}")
-    def personal_artifact_draft(draft_uid: str) -> dict[str, Any]:
+    def personal_artifact_draft(draft_uid: str, include_deleted: bool = False) -> dict[str, Any]:
         _require_capability(context, "artifact_drafts")
         try:
-            return get_artifact_draft(context.db_path, project_id=context.project_id, draft_uid=draft_uid)
+            return get_artifact_draft(
+                context.db_path,
+                project_id=context.project_id,
+                draft_uid=draft_uid,
+                include_deleted=include_deleted,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/personal/artifacts/{draft_uid}")
-    def personal_artifact_draft_alias(draft_uid: str) -> dict[str, Any]:
-        result = personal_artifact_draft(draft_uid)
+    def personal_artifact_draft_alias(draft_uid: str, include_deleted: bool = False) -> dict[str, Any]:
+        result = personal_artifact_draft(draft_uid, include_deleted)
         result.setdefault("artifact" + "_type", result.get("document_type", ""))
         return result
 
@@ -825,6 +855,37 @@ def register_personal_agent_routes(
     @app.post("/api/personal/artifacts/{draft_uid}/activate")
     def personal_artifact_draft_activate_alias(draft_uid: str) -> dict[str, Any]:
         return personal_artifact_draft_activate(draft_uid)
+
+    @app.post("/api/personal/drafts/{draft_uid}/trash")
+    def personal_artifact_draft_trash(draft_uid: str, req: PersonalArtifactDraftTrashRequest) -> dict[str, Any]:
+        _require_capability(context, "artifact_drafts")
+        try:
+            return trash_artifact_draft(
+                context.db_path,
+                project_id=context.project_id,
+                draft_uid=draft_uid,
+                confirm_impact=req.confirm_impact,
+                reason=req.reason,
+            )
+        except DraftConflictError as exc:
+            raise HTTPException(status_code=409, detail=exc.payload) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404 if "not found" in str(exc) else 400, detail=str(exc)) from exc
+
+    @app.post("/api/personal/drafts/{draft_uid}/restore")
+    def personal_artifact_draft_restore(draft_uid: str, req: PersonalArtifactDraftRestoreRequest) -> dict[str, Any]:
+        _require_capability(context, "artifact_drafts")
+        try:
+            return restore_artifact_draft(
+                context.db_path,
+                project_id=context.project_id,
+                draft_uid=draft_uid,
+                restore_status=req.restore_status,
+            )
+        except DraftStateError as exc:
+            raise HTTPException(status_code=409, detail=exc.payload or str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404 if "not found" in str(exc) else 400, detail=str(exc)) from exc
 
     @app.post("/api/personal/drafts/{draft_uid}/export")
     def personal_artifact_export(draft_uid: str, req: PersonalArtifactExportRequest) -> dict[str, Any]:

@@ -1,11 +1,13 @@
 export class ApiError extends Error {
   status: number;
   code?: string;
+  detail?: unknown;
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, detail?: unknown) {
     super(message);
     this.status = status;
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -32,7 +34,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const detail = data?.detail?.error ?? data?.detail ?? data?.error;
     const message = typeof detail === "string" ? detail : detail?.message ?? response.statusText;
-    throw new ApiError(response.status, message, detail?.code);
+    throw new ApiError(response.status, message, detail?.code, detail);
   }
   return data as T;
 }
@@ -201,7 +203,7 @@ export function apiUpload<TRes>(
         }
         const detail = data?.detail?.error ?? data?.detail ?? data?.error;
         const message = typeof detail === "string" ? detail : detail?.message ?? xhr.statusText;
-        reject(new ApiError(xhr.status, message, detail?.code));
+        reject(new ApiError(xhr.status, message, detail?.code, detail));
       } catch (error) {
         reject(error);
       }

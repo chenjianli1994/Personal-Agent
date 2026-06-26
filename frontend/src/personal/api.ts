@@ -14,6 +14,11 @@ import type {
   PersonalArtifactContent,
   PersonalArtifactDraft,
   PersonalArtifactDraftCreateInput,
+  PersonalArtifactDraftRestoreInput,
+  PersonalArtifactDraftRestoreResult,
+  PersonalArtifactDraftStatus,
+  PersonalArtifactDraftTrashInput,
+  PersonalArtifactDraftTrashResult,
   PersonalArtifactCodePatchInput,
   PersonalArtifactExport,
   PersonalArtifactExportInput,
@@ -87,9 +92,10 @@ export const personalAgentApi = {
     apiPost<PersonalLearningReviewInput, PersonalSkillUpdateCandidate>(`/api/personal/skills/update-candidates/${candidateId}/approve`, body),
   rejectSkillUpdateCandidate: (candidateId: number, body: PersonalLearningReviewInput) =>
     apiPost<PersonalLearningReviewInput, PersonalSkillUpdateCandidate>(`/api/personal/skills/update-candidates/${candidateId}/reject`, body),
-  draftList: (sessionUid?: string, taskUid?: string) =>
-    apiGet<PersonalArtifactDraft[]>(params("/api/personal/drafts", { session_uid: sessionUid, task_uid: taskUid })),
-  draftDetail: (draftUid: string) => apiGet<PersonalArtifactDraft>(`/api/personal/drafts/${encodeURIComponent(draftUid)}`),
+  draftList: (sessionUid?: string, taskUid?: string, status?: PersonalArtifactDraftStatus | "active_like" | "all") =>
+    apiGet<PersonalArtifactDraft[]>(params("/api/personal/drafts", { session_uid: sessionUid, task_uid: taskUid, status })),
+  draftDetail: (draftUid: string, includeDeleted?: boolean) =>
+    apiGet<PersonalArtifactDraft>(params(`/api/personal/drafts/${encodeURIComponent(draftUid)}`, { include_deleted: includeDeleted ? "true" : undefined })),
   draftContent: (draftUid: string, revisionIndex?: number) =>
     apiGet<PersonalArtifactContent>(params(`/api/personal/drafts/${encodeURIComponent(draftUid)}/content`, { revision_index: revisionIndex })),
   createDraft: (body: PersonalArtifactDraftCreateInput) =>
@@ -106,6 +112,10 @@ export const personalAgentApi = {
     apiPost<PersonalArtifactDraftReviseInput, PersonalArtifactDraft>(`/api/personal/drafts/${encodeURIComponent(draftUid)}/revise-manual`, body),
   activateDraft: (draftUid: string) =>
     apiPost<undefined, PersonalArtifactDraft>(`/api/personal/drafts/${encodeURIComponent(draftUid)}/activate`),
+  trashDraft: (draftUid: string, body: PersonalArtifactDraftTrashInput = {}) =>
+    apiPost<PersonalArtifactDraftTrashInput, PersonalArtifactDraftTrashResult>(`/api/personal/drafts/${encodeURIComponent(draftUid)}/trash`, body),
+  restoreDraft: (draftUid: string, body: PersonalArtifactDraftRestoreInput = {}) =>
+    apiPost<PersonalArtifactDraftRestoreInput, PersonalArtifactDraftRestoreResult>(`/api/personal/drafts/${encodeURIComponent(draftUid)}/restore`, body),
   exportDraft: (draftUid: string, body: PersonalArtifactExportInput) =>
     apiPost<PersonalArtifactExportInput, PersonalArtifactExport>(`/api/personal/drafts/${encodeURIComponent(draftUid)}/export`, body),
   openDraft: (draftUid: string, body: PersonalArtifactExportInput = {}) =>

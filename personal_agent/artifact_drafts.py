@@ -21,6 +21,8 @@ DOCUMENT_TYPES = {
 }
 
 CONTENT_FORMATS = {"markdown", "json_table", "diff", "text"}
+ACTIVE_LIKE_STATUSES = ("active", "quality_failed")
+RESTORABLE_DRAFT_STATUSES = set(ACTIVE_LIKE_STATUSES)
 
 # Canonical document pipeline order (single source of truth). A document type's
 # downstream = everything after it in this tuple. artifact_generation derives its
@@ -33,6 +35,18 @@ DOCUMENT_LINEAGE_ORDER = (
     "test_case_spec",
     "unit_test_code_or_diff",
 )
+
+
+class DraftConflictError(ValueError):
+    def __init__(self, message: str, *, payload: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.payload = payload
+
+
+class DraftStateError(ValueError):
+    def __init__(self, message: str, *, payload: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.payload = payload or {}
 
 
 def create_artifact_draft(
@@ -61,7 +75,7 @@ def create_artifact_draft(
         raise ValueError(f"unsupported document_type: {document_type}")
     if content_format not in CONTENT_FORMATS:
         raise ValueError(f"unsupported content_format: {content_format}")
-    if status not in {"active", "quality_failed"}:
+    if status not in RESTORABLE_DRAFT_STATUSES:
         raise ValueError(f"unsupported draft status: {status}")
     if not title:
         raise ValueError("title is required")
@@ -123,10 +137,13 @@ def list_artifact_drafts(
     project_id: int,
     session_uid: str | None = None,
     task_uid: str | None = None,
+    status_filter: str = "active_like",
 ) -> list[dict[str, Any]]:
     with connect(db_path) as conn:
-        where = ["d.project_id=?", "d.status IN ('active', 'quality_failed')"]
+        status_where, status_params = _draft_status_filter("d.status", status_filter)
+        where = ["d.project_id=?", status_where]
         params: list[Any] = [project_id]
+        params.extend(status_params)
         if session_uid is not None:
             where.append("d.session_uid=?")
             params.append(session_uid)
@@ -153,8 +170,15 @@ def list_artifact_drafts(
     return drafts
 
 
-def get_artifact_draft(db_path: Path, *, project_id: int, draft_uid: str) -> dict[str, Any]:
+def get_artifact_draft(
+    db_path: Path,
+    *,
+    project_id: int,
+    draft_uid: str,
+    include_deleted: bool = False,
+) -> dict[str, Any]:
     with connect(db_path) as conn:
+        status_where, status_params = _draft_status_filter("d.status", "all" if include_deleted else "active_like")
         row = conn.execute(
             """
             SELECT d.*,
@@ -163,9 +187,9 @@ def get_artifact_draft(db_path: Path, *, project_id: int, draft_uid: str) -> dic
             FROM personal_drafts d
             LEFT JOIN personal_draft_revisions r
               ON r.draft_uid=d.draft_uid AND r.revision_index=d.current_revision
-            WHERE d.project_id=? AND d.draft_uid=? AND d.status IN ('active', 'quality_failed')
-            """,
-            (project_id, draft_uid),
+            WHERE d.project_id=? AND d.draft_uid=? AND """
+            + status_where,
+            [project_id, draft_uid, *status_params],
         ).fetchone()
         if row is None:
             raise ValueError("draft not found")
@@ -228,7 +252,7 @@ def revise_artifact_draft_manual(
     status = status.strip() if isinstance(status, str) else None
     if not content:
         raise ValueError("content is required")
-    if status is not None and status not in {"active", "quality_failed"}:
+    if status is not None and status not in RESTORABLE_DRAFT_STATUSES:
         raise ValueError(f"unsupported draft status: {status}")
     now = utc_now()
     revision_uid = f"rev_{uuid4().hex}"
@@ -237,9 +261,9 @@ def revise_artifact_draft_manual(
             """
             SELECT id, current_revision, session_uid, document_type
             FROM personal_drafts
-            WHERE project_id=? AND draft_uid=? AND status IN ('active', 'quality_failed')
+            WHERE project_id=? AND draft_uid=? AND status IN (?, ?)
             """,
-            (project_id, draft_uid),
+            (project_id, draft_uid, *ACTIVE_LIKE_STATUSES),
         ).fetchone()
         if row is None:
             raise ValueError("draft not found")
@@ -280,9 +304,9 @@ def activate_artifact_draft(db_path: Path, *, project_id: int, draft_uid: str) -
             """
             SELECT id, session_uid, document_type
             FROM personal_drafts
-            WHERE project_id=? AND draft_uid=? AND status IN ('active', 'quality_failed')
+            WHERE project_id=? AND draft_uid=? AND status IN (?, ?)
             """,
-            (project_id, draft_uid),
+            (project_id, draft_uid, *ACTIVE_LIKE_STATUSES),
         ).fetchone()
         if row is None:
             raise ValueError("draft not found")
@@ -296,6 +320,106 @@ def activate_artifact_draft(db_path: Path, *, project_id: int, draft_uid: str) -
         _mark_downstream_lineage_stale(conn, project_id=project_id, draft_uid=draft_uid)
         _update_session_active_draft(conn, session_uid=draft_session_uid, draft_uid=draft_uid)
     return get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
+
+
+def trash_artifact_draft(
+    db_path: Path,
+    *,
+    project_id: int,
+    draft_uid: str,
+    confirm_impact: bool = False,
+    reason: str = "",
+) -> dict[str, Any]:
+    now = utc_now()
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM personal_drafts
+            WHERE project_id=? AND draft_uid=?
+            """,
+            (project_id, draft_uid),
+        ).fetchone()
+        if row is None:
+            raise ValueError("draft not found")
+        if str(row["status"] or "") == "deleted":
+            return {
+                "status": "deleted",
+                "draft_uid": draft_uid,
+                "impact": _deleted_draft_impact_from_metadata(row),
+            }
+        impact = _draft_trash_impact(conn, project_id=project_id, draft_row=row)
+        if impact["was_stage_current_candidate"] and not confirm_impact:
+            raise DraftConflictError(
+                "current_stage_candidate_requires_confirmation",
+                payload={
+                    "status": "blocked",
+                    "reason": "current_stage_candidate_requires_confirmation",
+                    "draft_uid": draft_uid,
+                    "impact": impact,
+                },
+            )
+        merged_metadata = _merge_metadata_for_trash(
+            _loads_json(row["metadata_json"], {}),
+            impact=impact,
+            reason=reason,
+            now=now,
+            from_status=str(row["status"] or "active"),
+            was_active=bool(row["is_active"]),
+        )
+        conn.execute(
+            """
+            UPDATE personal_drafts
+            SET status='deleted', is_active=0, metadata_json=?, updated_at=?
+            WHERE id=?
+            """,
+            (json_dumps(merged_metadata), now, row["id"]),
+        )
+        _clear_session_active_draft_if_needed(conn, session_uid=str(row["session_uid"] or ""), draft_uid=draft_uid)
+    return {"status": "deleted", "draft_uid": draft_uid, "impact": impact}
+
+
+def restore_artifact_draft(
+    db_path: Path,
+    *,
+    project_id: int,
+    draft_uid: str,
+    restore_status: str = "",
+) -> dict[str, Any]:
+    now = utc_now()
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM personal_drafts
+            WHERE project_id=? AND draft_uid=?
+            """,
+            (project_id, draft_uid),
+        ).fetchone()
+        if row is None:
+            raise ValueError("draft not found")
+        if str(row["status"] or "") != "deleted":
+            raise DraftStateError(
+                "draft is not deleted",
+                payload={"status": "conflict", "reason": "draft_not_deleted", "draft_uid": draft_uid},
+            )
+        metadata = _loads_json(row["metadata_json"], {})
+        target_status = _resolve_restore_status(restore_status, metadata)
+        metadata["restored_at"] = now
+        metadata["restored_to_status"] = target_status
+        conn.execute(
+            """
+            UPDATE personal_drafts
+            SET status=?, is_active=0, metadata_json=?, updated_at=?
+            WHERE id=?
+            """,
+            (target_status, json_dumps(metadata), now, row["id"]),
+        )
+    return {
+        "status": "restored",
+        "draft": get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid),
+        "impact": {"restored_status": target_status, "restored_as_session_active": False},
+    }
 
 
 def _clear_active_scope(conn: Any, *, project_id: int, session_uid: str, document_type: str) -> None:
@@ -326,13 +450,15 @@ def _update_session_active_draft(conn: Any, *, session_uid: str, draft_uid: str)
 
 
 def _mark_downstream_lineage_stale(conn: Any, *, project_id: int, draft_uid: str) -> None:
+    placeholders = ",".join("?" for _ in ACTIVE_LIKE_STATUSES)
     conn.execute(
         """
         UPDATE personal_drafts
         SET lineage_stale=1, updated_at=?
-        WHERE project_id=? AND derived_from_draft_uid=? AND status IN ('active', 'quality_failed')
-        """,
-        (utc_now(), project_id, draft_uid),
+        WHERE project_id=? AND derived_from_draft_uid=? AND status IN ("""
+        + placeholders
+        + ")",
+        (utc_now(), project_id, draft_uid, *ACTIVE_LIKE_STATUSES),
     )
 
 
@@ -348,14 +474,15 @@ def _mark_session_downstream_stale(conn: Any, *, project_id: int, session_uid: s
     if not session_uid or not downstream:
         return
     placeholders = ",".join("?" for _ in downstream)
+    status_placeholders = ",".join("?" for _ in ACTIVE_LIKE_STATUSES)
     conn.execute(
         f"""
         UPDATE personal_drafts
         SET lineage_stale=1, updated_at=?
         WHERE project_id=? AND session_uid=? AND document_type IN ({placeholders})
-          AND status IN ('active', 'quality_failed')
+          AND status IN ({status_placeholders})
         """,
-        (utc_now(), project_id, session_uid, *downstream),
+        (utc_now(), project_id, session_uid, *downstream, *ACTIVE_LIKE_STATUSES),
     )
 
 
@@ -514,14 +641,15 @@ def _task_display_indexes(conn: Any, *, project_id: int, session_uid: str) -> di
 
 def _candidate_metadata_by_draft_uid(conn: Any, *, project_id: int, task_uids: list[str]) -> dict[str, dict[str, int]]:
     placeholders = ",".join("?" for _ in task_uids)
+    status_placeholders = ",".join("?" for _ in ACTIVE_LIKE_STATUSES)
     rows = conn.execute(
         f"""
         SELECT id, draft_uid, task_uid, document_type
         FROM personal_drafts
-        WHERE project_id=? AND task_uid IN ({placeholders}) AND status IN ('active', 'quality_failed')
+        WHERE project_id=? AND task_uid IN ({placeholders}) AND status IN ({status_placeholders})
         ORDER BY id ASC
         """,
-        (project_id, *task_uids),
+        (project_id, *task_uids, *ACTIVE_LIKE_STATUSES),
     ).fetchall()
     grouped: dict[tuple[str, str], list[str]] = {}
     for row in rows:
@@ -541,14 +669,15 @@ def _candidate_metadata_by_draft_uid(conn: Any, *, project_id: int, task_uids: l
 
 def _effective_stages_by_task(conn: Any, *, project_id: int, task_uids: list[str]) -> dict[str, list[dict[str, Any]]]:
     placeholders = ",".join("?" for _ in task_uids)
+    status_placeholders = ",".join("?" for _ in ACTIVE_LIKE_STATUSES)
     rows = conn.execute(
         f"""
         SELECT *
         FROM personal_drafts
-        WHERE project_id=? AND task_uid IN ({placeholders}) AND status IN ('active', 'quality_failed')
+        WHERE project_id=? AND task_uid IN ({placeholders}) AND status IN ({status_placeholders})
         ORDER BY task_uid ASC, is_active DESC, id DESC
         """,
-        (project_id, *task_uids),
+        (project_id, *task_uids, *ACTIVE_LIKE_STATUSES),
     ).fetchall()
     grouped_rows: dict[str, list[Any]] = {task_uid: [] for task_uid in task_uids}
     for row in rows:
@@ -619,3 +748,144 @@ def _loads_json(text: str, default: Any) -> Any:
         return json.loads(text or "")
     except Exception:
         return default
+
+
+def _active_like_statuses() -> tuple[str, ...]:
+    return ACTIVE_LIKE_STATUSES
+
+
+def _draft_status_filter(column: str, status_filter: str) -> tuple[str, list[Any]]:
+    status_filter = (status_filter or "active_like").strip() or "active_like"
+    if status_filter == "active_like":
+        placeholders = ",".join("?" for _ in ACTIVE_LIKE_STATUSES)
+        return f"{column} IN ({placeholders})", list(ACTIVE_LIKE_STATUSES)
+    if status_filter == "all":
+        return f"{column} IN (?, ?, ?)", ["active", "quality_failed", "deleted"]
+    if status_filter in {"active", "quality_failed", "deleted"}:
+        return f"{column}=?", [status_filter]
+    raise ValueError(f"unsupported draft status filter: {status_filter}")
+
+
+def _draft_trash_impact(conn: Any, *, project_id: int, draft_row: Any) -> dict[str, Any]:
+    draft_uid = str(draft_row["draft_uid"] or "")
+    session_uid = str(draft_row["session_uid"] or "")
+    task_uid = str(draft_row["task_uid"] or "")
+    document_type = str(draft_row["document_type"] or "")
+    session_row = None
+    if session_uid:
+        session_row = conn.execute(
+            "SELECT active_draft_uid FROM personal_sessions WHERE session_uid=? AND status='active'",
+            (session_uid,),
+        ).fetchone()
+    was_session_active = bool(draft_row["is_active"]) or bool(session_row and str(session_row["active_draft_uid"] or "") == draft_uid)
+    was_stage_current_candidate = False
+    if task_uid and document_type:
+        stages = _effective_stages_by_task(conn, project_id=project_id, task_uids=[task_uid]).get(task_uid, [])
+        was_stage_current_candidate = any(
+            str(stage.get("document_type") or "") == document_type and str(stage.get("draft_uid") or "") == draft_uid
+            for stage in stages
+        )
+    fallback = _fallback_stage_candidate(conn, project_id=project_id, draft_row=draft_row)
+    return {
+        "was_session_active": was_session_active,
+        "was_stage_current_candidate": was_stage_current_candidate,
+        "fallback_draft_uid": fallback.get("draft_uid", ""),
+        "fallback_candidate_index": fallback.get("candidate_index"),
+        "fallback_title": fallback.get("title", ""),
+        "affected_task_uid": task_uid,
+        "affected_document_type": document_type,
+        "affected_session_uid": session_uid,
+    }
+
+
+def _fallback_stage_candidate(conn: Any, *, project_id: int, draft_row: Any) -> dict[str, Any]:
+    task_uid = str(draft_row["task_uid"] or "")
+    document_type = str(draft_row["document_type"] or "")
+    draft_uid = str(draft_row["draft_uid"] or "")
+    if not task_uid or not document_type:
+        return {}
+    placeholders = ",".join("?" for _ in ACTIVE_LIKE_STATUSES)
+    fallback = conn.execute(
+        f"""
+        SELECT id, draft_uid, title
+        FROM personal_drafts
+        WHERE project_id=? AND task_uid=? AND document_type=? AND status IN ({placeholders}) AND draft_uid != ?
+        ORDER BY is_active DESC, id DESC
+        LIMIT 1
+        """,
+        (project_id, task_uid, document_type, *ACTIVE_LIKE_STATUSES, draft_uid),
+    ).fetchone()
+    if fallback is None:
+        return {}
+    candidate_rows = conn.execute(
+        f"""
+        SELECT draft_uid
+        FROM personal_drafts
+        WHERE project_id=? AND task_uid=? AND document_type=? AND status IN ({placeholders}) AND draft_uid != ?
+        ORDER BY id ASC
+        """,
+        (project_id, task_uid, document_type, *ACTIVE_LIKE_STATUSES, draft_uid),
+    ).fetchall()
+    candidate_index = None
+    for index, candidate_row in enumerate(candidate_rows, start=1):
+        if str(candidate_row["draft_uid"] or "") == str(fallback["draft_uid"] or ""):
+            candidate_index = index
+            break
+    return {
+        "draft_uid": str(fallback["draft_uid"] or ""),
+        "candidate_index": candidate_index,
+        "title": str(fallback["title"] or ""),
+    }
+
+
+def _clear_session_active_draft_if_needed(conn: Any, *, session_uid: str, draft_uid: str) -> None:
+    if not session_uid:
+        return
+    conn.execute(
+        """
+        UPDATE personal_sessions
+        SET active_draft_uid='', updated_at=?
+        WHERE session_uid=? AND status='active' AND active_draft_uid=?
+        """,
+        (utc_now(), session_uid, draft_uid),
+    )
+
+
+def _merge_metadata_for_trash(
+    metadata: dict[str, Any],
+    *,
+    impact: dict[str, Any],
+    reason: str,
+    now: str,
+    from_status: str,
+    was_active: bool,
+) -> dict[str, Any]:
+    merged = dict(metadata)
+    merged["deleted_at"] = now
+    merged["deleted_reason"] = reason.strip()
+    merged["deleted_from_status"] = from_status if from_status in RESTORABLE_DRAFT_STATUSES else "active"
+    merged["deleted_was_active"] = was_active or bool(impact.get("was_session_active"))
+    merged["deleted_was_stage_current_candidate"] = bool(impact.get("was_stage_current_candidate"))
+    merged["deleted_fallback_draft_uid"] = str(impact.get("fallback_draft_uid") or "")
+    merged["deleted_fallback_candidate_index"] = impact.get("fallback_candidate_index")
+    merged["deleted_fallback_title"] = str(impact.get("fallback_title") or "")
+    return merged
+
+
+def _resolve_restore_status(restore_status: str, metadata: dict[str, Any]) -> str:
+    candidate = (restore_status or str(metadata.get("deleted_from_status") or "")).strip() or "active"
+    return candidate if candidate in RESTORABLE_DRAFT_STATUSES else "active"
+
+
+def _deleted_draft_impact_from_metadata(row: Any) -> dict[str, Any]:
+    metadata = _loads_json(row["metadata_json"], {})
+    return {
+        "was_session_active": bool(metadata.get("deleted_was_active")),
+        "was_stage_current_candidate": bool(metadata.get("deleted_was_stage_current_candidate")),
+        "fallback_draft_uid": str(metadata.get("deleted_fallback_draft_uid") or ""),
+        "fallback_candidate_index": metadata.get("deleted_fallback_candidate_index"),
+        "fallback_title": str(metadata.get("deleted_fallback_title") or ""),
+        "affected_task_uid": str(row["task_uid"] or ""),
+        "affected_document_type": str(row["document_type"] or ""),
+        "affected_session_uid": str(row["session_uid"] or ""),
+    }

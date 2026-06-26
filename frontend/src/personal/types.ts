@@ -227,6 +227,8 @@ export type PersonalArtifactRevision = {
   preview?: string;
 };
 
+export type PersonalArtifactDraftStatus = "active" | "quality_failed" | "deleted";
+
 export type PersonalArtifactDraft = {
   id?: number;
   draft_uid: string;
@@ -241,7 +243,7 @@ export type PersonalArtifactDraft = {
   revision_count: number;
   derived_from_draft_uid?: string;
   lineage_stale?: boolean;
-  status?: string;
+  status?: PersonalArtifactDraftStatus;
   is_active: boolean;
   metadata: Record<string, unknown>;
   created_at?: string;
@@ -260,6 +262,42 @@ export type PersonalArtifactDraft = {
   candidate_index?: number | null;
   stage_candidate_count?: number;
   is_stage_current_candidate?: boolean;
+};
+
+export type PersonalArtifactDraftTrashInput = {
+  confirm_impact?: boolean;
+  reason?: string;
+};
+
+export type PersonalArtifactDraftRestoreInput = {
+  restore_status?: Extract<PersonalArtifactDraftStatus, "active" | "quality_failed">;
+};
+
+export type PersonalArtifactDraftManagementImpact = {
+  was_session_active?: boolean;
+  was_stage_current_candidate?: boolean;
+  fallback_draft_uid?: string;
+  fallback_candidate_index?: number | null;
+  fallback_title?: string;
+  affected_task_uid?: string;
+  affected_document_type?: string;
+  affected_session_uid?: string;
+};
+
+export type PersonalArtifactDraftTrashResult = {
+  status: "deleted" | "blocked";
+  draft_uid: string;
+  reason?: string;
+  impact?: PersonalArtifactDraftManagementImpact;
+};
+
+export type PersonalArtifactDraftRestoreResult = {
+  status: "restored";
+  draft: PersonalArtifactDraft;
+  impact?: {
+    restored_status?: Extract<PersonalArtifactDraftStatus, "active" | "quality_failed">;
+    restored_as_session_active?: boolean;
+  };
 };
 
 export type PersonalSkillEval = {

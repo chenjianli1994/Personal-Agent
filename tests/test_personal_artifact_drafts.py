@@ -400,6 +400,224 @@ def test_unlinked_draft_payload_keeps_empty_task_context(tmp_path: Path, monkeyp
     assert payload["is_stage_current_candidate"] is False
 
 
+def test_draft_trash_restore_and_status_filters(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+
+    session_uid = client.post("/api/personal/chat/turn", json={"content": "草稿回收站会话"}).json()["session"]["session_uid"]
+    kept = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "functional_spec", "session_uid": session_uid, "title": "保留草稿", "content": "# keep"},
+    ).json()
+    deleted = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "requirement_breakdown", "session_uid": session_uid, "title": "待删除草稿", "content": "# delete"},
+    ).json()
+
+    with connect(tmp_path / "agent.db") as conn:
+        conn.execute(
+            "UPDATE personal_drafts SET status='quality_failed', is_active=0 WHERE draft_uid=?",
+            (kept["draft_uid"],),
+        )
+
+    trashed = client.post(
+        f"/api/personal/drafts/{deleted['draft_uid']}/trash",
+        json={"reason": "cleanup"},
+    )
+    assert trashed.status_code == 200
+    assert trashed.json()["status"] == "deleted"
+    assert trashed.json()["impact"]["was_session_active"] is True
+    assert trashed.json()["impact"]["was_stage_current_candidate"] is False
+
+    default_list = client.get("/api/personal/drafts", params={"session_uid": session_uid})
+    assert default_list.status_code == 200
+    assert {item["draft_uid"] for item in default_list.json()} == {kept["draft_uid"]}
+
+    deleted_list = client.get("/api/personal/drafts", params={"session_uid": session_uid, "status": "deleted"})
+    assert deleted_list.status_code == 200
+    assert [item["draft_uid"] for item in deleted_list.json()] == [deleted["draft_uid"]]
+
+    all_list = client.get("/api/personal/drafts", params={"session_uid": session_uid, "status": "all"})
+    assert all_list.status_code == 200
+    assert {item["draft_uid"] for item in all_list.json()} == {kept["draft_uid"], deleted["draft_uid"]}
+
+    active_only = client.get("/api/personal/drafts", params={"session_uid": session_uid, "status": "active"})
+    assert active_only.status_code == 200
+    assert active_only.json() == []
+
+    failed_only = client.get("/api/personal/drafts", params={"session_uid": session_uid, "status": "quality_failed"})
+    assert failed_only.status_code == 200
+    assert [item["draft_uid"] for item in failed_only.json()] == [kept["draft_uid"]]
+
+    missing_deleted_detail = client.get(f"/api/personal/drafts/{deleted['draft_uid']}")
+    assert missing_deleted_detail.status_code == 404
+
+    deleted_detail = client.get(
+        f"/api/personal/drafts/{deleted['draft_uid']}",
+        params={"include_deleted": "true"},
+    )
+    assert deleted_detail.status_code == 200
+    assert deleted_detail.json()["status"] == "deleted"
+    assert deleted_detail.json()["revisions"][0]["revision_index"] == 1
+
+    restored = client.post(f"/api/personal/drafts/{deleted['draft_uid']}/restore", json={})
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "restored"
+    assert restored.json()["draft"]["status"] == "active"
+    assert restored.json()["draft"]["is_active"] is False
+    assert restored.json()["impact"]["restored_status"] == "active"
+    assert restored.json()["impact"]["restored_as_session_active"] is False
+
+    with connect(tmp_path / "agent.db") as conn:
+        session_row = conn.execute(
+            "SELECT active_draft_uid FROM personal_sessions WHERE session_uid=?",
+            (session_uid,),
+        ).fetchone()
+        restored_row = conn.execute(
+            "SELECT status, is_active, metadata_json FROM personal_drafts WHERE draft_uid=?",
+            (deleted["draft_uid"],),
+        ).fetchone()
+    assert session_row["active_draft_uid"] == ""
+    assert restored_row["status"] == "active"
+    assert restored_row["is_active"] == 0
+    assert "deleted_at" in restored_row["metadata_json"]
+    assert "restored_at" in restored_row["metadata_json"]
+
+
+def test_deleted_draft_is_hidden_from_standard_actions(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    client = _client(tmp_path)
+
+    draft = client.post(
+        "/api/personal/drafts",
+        json={"document_type": "functional_spec", "session_uid": "session_deleted", "title": "回收站草稿", "content": "# deleted"},
+    ).json()
+    trash = client.post(f"/api/personal/drafts/{draft['draft_uid']}/trash", json={"reason": "cleanup"})
+    assert trash.status_code == 200
+
+    revise = client.post(
+        f"/api/personal/drafts/{draft['draft_uid']}/revise-manual",
+        json={"content": "# revised"},
+    )
+    assert revise.status_code == 404
+
+    activate = client.post(f"/api/personal/drafts/{draft['draft_uid']}/activate")
+    assert activate.status_code == 404
+
+    open_result = client.post(f"/api/personal/drafts/{draft['draft_uid']}/open", json={})
+    assert open_result.status_code == 404
+
+    export_result = client.post(f"/api/personal/drafts/{draft['draft_uid']}/export", json={"format": "md"})
+    assert export_result.status_code == 404
+
+    second_restore = client.post(f"/api/personal/drafts/{draft['draft_uid']}/restore", json={})
+    assert second_restore.status_code == 200
+    duplicate_restore = client.post(f"/api/personal/drafts/{draft['draft_uid']}/restore", json={})
+    assert duplicate_restore.status_code == 409
+    assert duplicate_restore.json()["detail"]["reason"] == "draft_not_deleted"
+
+
+def test_trash_current_stage_candidate_requires_confirmation_and_recomputes_fallback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    session_uid = client.post("/api/personal/chat/turn", json={"content": "删除当前采用候选"}).json()["session"]["session_uid"]
+    source_uid = client.post(
+        "/api/personal/sources/text",
+        json={"title": "输入", "content": "需要生成需求分析", "make_active": True},
+    ).json()["source_uid"]
+    task = client.post(
+        "/api/personal/dev-tasks/start",
+        json={"session_uid": session_uid, "prompt": "开始开发任务", "source_uids": [source_uid]},
+    ).json()
+    current_draft_uid = task["stages"][0]["draft_uid"]
+
+    fallback = client.post(
+        "/api/personal/drafts",
+        json={
+            "document_type": "requirement_analysis_report",
+            "session_uid": session_uid,
+            "task_uid": task["task_uid"],
+            "title": "候选二",
+            "content": "# 候选二",
+            "make_active": False,
+        },
+    ).json()
+
+    blocked = client.post(
+        f"/api/personal/drafts/{current_draft_uid}/trash",
+        json={"reason": "remove current candidate"},
+    )
+    assert blocked.status_code == 409
+    detail = blocked.json()["detail"]
+    assert detail["status"] == "blocked"
+    assert detail["reason"] == "current_stage_candidate_requires_confirmation"
+    assert detail["impact"]["was_stage_current_candidate"] is True
+    assert detail["impact"]["fallback_draft_uid"] == fallback["draft_uid"]
+    assert detail["impact"]["fallback_candidate_index"] == 1
+
+    confirmed = client.post(
+        f"/api/personal/drafts/{current_draft_uid}/trash",
+        json={"reason": "remove current candidate", "confirm_impact": True},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["status"] == "deleted"
+
+    listed = client.get("/api/personal/drafts", params={"task_uid": task["task_uid"]})
+    assert listed.status_code == 200
+    assert [item["draft_uid"] for item in listed.json()] == [fallback["draft_uid"]]
+    assert listed.json()[0]["candidate_index"] == 1
+    assert listed.json()[0]["stage_candidate_count"] == 1
+    assert listed.json()[0]["is_stage_current_candidate"] is True
+
+    task_detail = client.get(f"/api/personal/dev-tasks/{task['task_uid']}")
+    assert task_detail.status_code == 200
+    requirement_stage = next(item for item in task_detail.json()["stages"] if item["document_type"] == "requirement_analysis_report")
+    assert requirement_stage["draft_uid"] == fallback["draft_uid"]
+    assert requirement_stage["effective_status"] == "done"
+
+
+def test_trash_current_stage_candidate_without_fallback_makes_stage_pending(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    session_uid = client.post("/api/personal/chat/turn", json={"content": "删除唯一候选"}).json()["session"]["session_uid"]
+    source_uid = client.post(
+        "/api/personal/sources/text",
+        json={"title": "输入", "content": "只生成一个需求分析候选", "make_active": True},
+    ).json()["source_uid"]
+    task = client.post(
+        "/api/personal/dev-tasks/start",
+        json={"session_uid": session_uid, "prompt": "开始唯一候选任务", "source_uids": [source_uid]},
+    ).json()
+    current_draft_uid = task["stages"][0]["draft_uid"]
+
+    blocked = client.post(
+        f"/api/personal/drafts/{current_draft_uid}/trash",
+        json={"reason": "remove only candidate"},
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["impact"]["fallback_draft_uid"] == ""
+
+    confirmed = client.post(
+        f"/api/personal/drafts/{current_draft_uid}/trash",
+        json={"reason": "remove only candidate", "confirm_impact": True},
+    )
+    assert confirmed.status_code == 200
+
+    task_detail = client.get(f"/api/personal/dev-tasks/{task['task_uid']}")
+    assert task_detail.status_code == 200
+    requirement_stage = next(item for item in task_detail.json()["stages"] if item["document_type"] == "requirement_analysis_report")
+    assert requirement_stage["draft_uid"] == ""
+    assert requirement_stage["effective_status"] == "pending"
+
+
 def _client(tmp_path: Path) -> TestClient:
     db_path = tmp_path / "agent.db"
     workspace = tmp_path / "workspace"
