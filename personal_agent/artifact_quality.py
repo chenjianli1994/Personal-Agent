@@ -58,12 +58,19 @@ def validate_generated_artifact(
 
     evidence_refs = context.get("evidence_refs") if isinstance(context.get("evidence_refs"), dict) else {}
     has_evidence = any(bool(value) for value in evidence_refs.values())
+    active_conversation_decisions = context.get("active_conversation_decisions") if isinstance(context.get("active_conversation_decisions"), list) else []
+    weak_conversation_references = context.get("weak_conversation_references") if isinstance(context.get("weak_conversation_references"), list) else []
+    conversation_conflicts = context.get("conversation_conflicts") if isinstance(context.get("conversation_conflicts"), list) else []
     if document_type in {"requirement_analysis_report", "requirement_breakdown", "functional_spec", "detailed_design"}:
         evidence_ok = has_evidence or _mentions_evidence(stripped)
         add("has_evidence_reference", evidence_ok, "文档必须引用输入资料、知识、记忆或代码证据")
         add("evidence_policy_satisfied", evidence_ok, "文档必须满足证据引用策略")
     else:
         add("evidence_policy_satisfied", True, "文档满足证据引用策略")
+    add("conversation_evidence_applied", _conversation_evidence_applied(stripped, active_conversation_decisions), "存在 active_conversation_decisions 时，正文必须覆盖其核心语义")
+    add("tentative_content_not_promoted", _tentative_content_not_promoted(stripped, weak_conversation_references), "弱参考内容不得被正文表述成已确认事实")
+    add("conversation_conflict_rendered", _conversation_conflict_rendered(stripped, conversation_conflicts), "会话结论与源文冲突时，必须保留冲突留痕")
+    add("internal_ids_not_leaked", _internal_ids_not_leaked(stripped), "正文不得泄漏内部 evidence uid、candidate id、session memory id 或 message uid")
 
     if document_type == "requirement_analysis_report":
         add("evidence_refs_consistent", _evidence_refs_consistent(stripped, context), "需求分析报告不能引用未由上下文提供的代码文件、接口或模块证据")
@@ -173,6 +180,126 @@ def _contains_all(content: str, tokens: list[str]) -> bool:
 
 def _has_any(content: str, tokens: list[str]) -> bool:
     return any(token.lower() in content for token in tokens)
+
+
+def _conversation_evidence_applied(content: str, decisions: list[dict[str, Any]]) -> bool:
+    if not decisions:
+        return True
+    lowered = content.lower()
+    for item in decisions:
+        statement = str(item.get("statement") or "").strip()
+        if not statement:
+            continue
+        if not _statement_covered(statement, lowered):
+            return False
+    return True
+
+
+def _tentative_content_not_promoted(content: str, references: list[dict[str, Any]]) -> bool:
+    if not references:
+        return True
+    lowered = content.lower()
+    for item in references:
+        statement = str(item.get("statement") or "").strip()
+        if not statement:
+            continue
+        if _statement_covered(statement, lowered) and not _statement_rendered_as_uncertainty(statement, lowered):
+            return False
+    return True
+
+
+def _conversation_conflict_rendered(content: str, conflicts: list[dict[str, Any]]) -> bool:
+    if not conflicts:
+        return True
+    lowered = content.lower()
+    for item in conflicts:
+        conversation_statement = str(item.get("conversation_statement") or "").strip()
+        source_quote = str(item.get("source_quote") or "").strip()
+        if conversation_statement and not _statement_covered(conversation_statement, lowered):
+            return False
+        if source_quote and not _statement_covered(source_quote, lowered):
+            return False
+    return True
+
+
+def _internal_ids_not_leaked(content: str) -> bool:
+    lowered = content.lower()
+    patterns = [
+        r"\bevidence_[0-9a-f]{8,}\b",
+        r"\bdraft_[0-9a-f]{8,}\b",
+        r"\bmsg_[0-9a-f]{8,}\b",
+        r"\bsession_[0-9a-f]{8,}\b",
+        r"\bcandidate:\d+\b",
+        r"\bmemory candidate\b",
+        r"\bsession memory id\b",
+    ]
+    return not any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def _statement_covered(statement: str, lowered_content: str) -> bool:
+    tokens = _coverage_tokens(statement)
+    if not tokens:
+        return True
+    matched = sum(1 for token in tokens if token in lowered_content)
+    return matched / len(tokens) >= 0.6
+
+
+def _statement_rendered_as_uncertainty(statement: str, lowered_content: str) -> bool:
+    windows = _statement_windows(statement, lowered_content)
+    if not windows:
+        return False
+    markers = {
+        "待确认",
+        "待澄清",
+        "待补充",
+        "风险",
+        "不确定",
+        "可能",
+        "建议",
+        "pending",
+        "uncertain",
+        "uncertainty",
+        "risk",
+        "note",
+        "todo",
+        "tbd",
+        "to be confirmed",
+    }
+    return any(any(marker in window for marker in markers) for window in windows)
+
+
+def _statement_windows(statement: str, lowered_content: str) -> list[str]:
+    tokens = _coverage_tokens(statement)
+    if not tokens:
+        return []
+    first = next((token for token in tokens if token in lowered_content), "")
+    if not first:
+        return []
+    windows: list[str] = []
+    start = 0
+    while True:
+        index = lowered_content.find(first, start)
+        if index < 0:
+            break
+        left = max(0, index - 40)
+        right = min(len(lowered_content), index + max(len(statement), 80))
+        windows.append(lowered_content[left:right])
+        start = index + len(first)
+    return windows
+
+
+def _coverage_tokens(statement: str) -> list[str]:
+    text = re.sub(r"\s+", " ", statement.lower())
+    text = re.sub(r"[，,。；;：:（）()【】\[\]<>《》\"'`]", " ", text)
+    tokens = re.findall(r"[a-z0-9_./+-]+|[\u4e00-\u9fff]{2,8}", text)
+    result: list[str] = []
+    for token in tokens:
+        token = token.strip()
+        if len(token) < 2:
+            continue
+        if token not in result:
+            result.append(token)
+    return result[:10]
 
 
 def _evidence_refs_consistent(content: str, context: dict[str, Any]) -> bool:

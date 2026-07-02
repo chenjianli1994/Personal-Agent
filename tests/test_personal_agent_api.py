@@ -286,7 +286,8 @@ def test_personal_analysis_uses_llm_intent_route_and_answer(tmp_path: Path, monk
             row["purpose"]
             for row in conn.execute("SELECT purpose FROM llm_call_logs ORDER BY id DESC LIMIT 3").fetchall()
         ]
-    assert purposes == ["personal_chat_answer", "personal_intent_route"]
+    assert "personal_chat_answer" in purposes
+    assert "personal_intent_route" in purposes
 
 
 def test_personal_chat_turn_activates_attached_sources_before_routing(tmp_path: Path, monkeypatch) -> None:
@@ -363,10 +364,17 @@ def test_personal_document_generation_uses_llm_route_and_skill_generation(tmp_pa
     with connect(db_path) as conn:
         purposes = [
             row["purpose"]
-            for row in conn.execute("SELECT purpose FROM llm_call_logs ORDER BY id DESC LIMIT 5").fetchall()
+            for row in conn.execute("SELECT purpose FROM llm_call_logs ORDER BY id DESC LIMIT 8").fetchall()
         ]
+        draft_row = conn.execute(
+            "SELECT metadata_json FROM personal_drafts ORDER BY id DESC LIMIT 1"
+        ).fetchone()
         draft_count = conn.execute("SELECT COUNT(*) FROM personal_drafts").fetchone()[0]
+    metadata = json.loads(draft_row["metadata_json"] or "{}") if draft_row else {}
+    generation = metadata.get("generation") if isinstance(metadata, dict) else {}
     assert "personal_intent_route" in purposes
+    if generation.get("conversation_evidence_used") or generation.get("weak_conversation_references"):
+        assert "personal_conversation_evidence_model" in purposes
     assert "personal_artifact_generate" in purposes
     assert draft_count == 1
 

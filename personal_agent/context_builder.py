@@ -6,6 +6,7 @@ from typing import Any
 
 from personal_agent.core.codebase.index_store import latest_repository
 from personal_agent.core.database import connect
+from .conversation_evidence import build_conversation_evidence_snapshot
 from .knowledge_recall import recall_knowledge_for_context
 from .knowledge_learning import pending_session_memory_candidates
 
@@ -53,12 +54,23 @@ class PersonalContextBuilder:
         ]
         recalled = recall_knowledge_for_context(self.db_path, project_id=self.project_id, query=prompt, limit=8)
         session_memories = pending_session_memory_candidates(self.db_path, project_id=self.project_id, session_uid=session_uid)
+        active_draft_payload = dict(draft) if draft else {}
+        conversation_evidence = build_conversation_evidence_snapshot(
+            self.db_path,
+            project_id=self.project_id,
+            session_uid=session_uid,
+            document_type=str(active_draft_payload.get("document_type") or ""),
+            active_source_uids=[item["source_uid"] for item in source_payload],
+            sources=source_payload,
+            task_uid=str(active_draft_payload.get("task_uid") or ""),
+            active_draft_uid=str(active_draft_payload.get("draft_uid") or ""),
+        )
         return {
             "prompt": prompt,
             "session_uid": session_uid,
             "sources": source_payload,
             "active_source_uids": [item["source_uid"] for item in source_payload],
-            "active_draft": dict(draft) if draft else {},
+            "active_draft": active_draft_payload,
             "recent_messages": [_message_context(row) for row in reversed(messages)],
             "knowledge_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in recalled["knowledge"]],
             "memory_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in recalled["memories"]],
@@ -67,6 +79,7 @@ class PersonalContextBuilder:
             "pending_memory_candidates": session_memories,
             "code_evidence": latest_repository(self.db_path, self.project_id) or {},
             "requirement_summary": _requirement_summary(source_payload, prompt),
+            **conversation_evidence,
         }
 
 
@@ -120,7 +133,7 @@ def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any
         if preferred_draft_uid:
             preferred = conn.execute(
                 """
-                SELECT draft_uid, document_type, title, current_revision, session_uid, status
+                SELECT draft_uid, document_type, title, current_revision, session_uid, task_uid, status
                 FROM personal_drafts
                 WHERE project_id=? AND draft_uid=? AND session_uid=? AND status IN ('active', 'quality_failed') AND is_active=1
                 """,
@@ -130,7 +143,7 @@ def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any
                 return preferred
         return conn.execute(
             """
-            SELECT draft_uid, document_type, title, current_revision, session_uid, status
+            SELECT draft_uid, document_type, title, current_revision, session_uid, task_uid, status
             FROM personal_drafts
             WHERE project_id=? AND session_uid=? AND status IN ('active', 'quality_failed') AND is_active=1
             ORDER BY updated_at DESC, id DESC LIMIT 1
@@ -140,7 +153,7 @@ def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any
     if preferred_draft_uid:
         preferred = conn.execute(
             """
-            SELECT draft_uid, document_type, title, current_revision, session_uid, status
+            SELECT draft_uid, document_type, title, current_revision, session_uid, task_uid, status
             FROM personal_drafts
             WHERE project_id=? AND draft_uid=? AND status IN ('active', 'quality_failed') AND is_active=1
             """,
@@ -150,7 +163,7 @@ def _select_active_draft(conn: Any, *, project_id: int, session_uid: str) -> Any
             return preferred
     return conn.execute(
         """
-        SELECT draft_uid, document_type, title, current_revision, session_uid, status
+        SELECT draft_uid, document_type, title, current_revision, session_uid, task_uid, status
         FROM personal_drafts
         WHERE project_id=? AND status IN ('active', 'quality_failed') AND is_active=1
         ORDER BY updated_at DESC, id DESC LIMIT 1

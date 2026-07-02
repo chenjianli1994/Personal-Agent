@@ -449,6 +449,8 @@ class PersonalRuntime:
             document_type=document_type,
             source_uids=context["active_source_uids"],
             session_task_uid=session_uid,
+            session_uid=session_uid,
+            task_uid=str((context.get("active_draft") or {}).get("task_uid") or ""),
             make_active=True,
         )
         answer = _draft_generation_answer(draft)
@@ -488,6 +490,8 @@ class PersonalRuntime:
             feedback=prompt,
             base_revision_index=base_revision_index,
             session_task_uid=session_uid,
+            session_uid=session_uid,
+            task_uid=str((target.get("task_uid") or (context.get("active_draft") or {}).get("task_uid") or "")),
             make_active=True,
         )
         if target.get("explicit_revision"):

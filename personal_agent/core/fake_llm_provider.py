@@ -24,6 +24,25 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
             "control_branches": control_branches,
             "open_questions": [],
         }
+    if purpose == "personal_conversation_evidence_model":
+        try:
+            payload = json.loads(user_prompt)
+        except Exception:
+            payload = {}
+        statements = payload.get("statements") if isinstance(payload.get("statements"), list) else []
+        items = []
+        for item in statements:
+            if not isinstance(item, dict):
+                continue
+            statement_id = str(item.get("statement_id") or "")
+            statement = str(item.get("statement") or "")
+            items.append(
+                {
+                    "statement_id": statement_id,
+                    "topic_key": _fake_conversation_topic_key(statement),
+                }
+            )
+        return {"items": items}
     if purpose == "personal_skill_reflect":
         try:
             payload = json.loads(user_prompt)
@@ -298,6 +317,10 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
         artifact_type = str(payload.get("document_type") or payload.get("artifact_type") or "requirement_analysis_report")
         content_format = str(payload.get("content_format") or "markdown")
         sources = payload.get("sources") if isinstance(payload.get("sources"), list) else []
+        conversation_evidence = payload.get("conversation_evidence") if isinstance(payload.get("conversation_evidence"), dict) else {}
+        active_conversation_decisions = conversation_evidence.get("active_conversation_decisions") if isinstance(conversation_evidence.get("active_conversation_decisions"), list) else []
+        weak_conversation_references = conversation_evidence.get("weak_conversation_references") if isinstance(conversation_evidence.get("weak_conversation_references"), list) else []
+        conversation_conflicts = conversation_evidence.get("conversation_conflicts") if isinstance(conversation_evidence.get("conversation_conflicts"), list) else []
         current_draft = payload.get("current_draft") if isinstance(payload.get("current_draft"), dict) else {}
         feedback = str(payload.get("feedback") or "")
         memories = payload.get("memories") if isinstance(payload.get("memories"), list) else []
@@ -332,14 +355,25 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
                 symbol_names.append(item)
         symbol_text = ", ".join(symbol_names[:5]) or "no symbol candidates"
         revision_line = f"- 本版已按方向性修改意见重组：{feedback}\n" if purpose == "personal_artifact_revise" and feedback else ""
+        conversation_lines = [f"- 会话结论：{str(item.get('statement') or '')}" for item in active_conversation_decisions if str(item.get("statement") or "").strip()]
+        weak_lines = [f"- 待确认：{str(item.get('statement') or '')}" for item in weak_conversation_references if str(item.get("statement") or "").strip()]
+        conflict_lines = [
+            f"- 源文写法：{str(item.get('source_quote') or '')}；会话最终结论：{str(item.get('conversation_statement') or '')}"
+            for item in conversation_conflicts
+            if str(item.get("conversation_statement") or "").strip()
+        ]
         if artifact_type == "test_case_spec":
+            if conversation_lines:
+                expected = str(active_conversation_decisions[0].get("statement") or "输出满足需求目标")
+            else:
+                expected = "输出满足需求目标"
             return {
                 "title": "测试用例规格",
                 "content_format": "json_table",
                 "content": {
                     "columns": ["id", "requirement_ref", "scenario", "precondition", "expected", "evidence"],
                     "rows": [
-                        {"id": "TC-001", "requirement_ref": "REQ-001", "scenario": "normal 正常路径", "precondition": "输入满足触发条件", "expected": "输出满足需求目标", "evidence": source_uid},
+                        {"id": "TC-001", "requirement_ref": "REQ-001", "scenario": "normal 正常路径", "precondition": "输入满足触发条件", "expected": expected, "evidence": source_uid},
                         {"id": "TC-002", "requirement_ref": "REQ-001", "scenario": "boundary 边界条件", "precondition": "输入接近边界值", "expected": "系统保持定义行为", "evidence": source_uid},
                         {"id": "TC-003", "requirement_ref": "REQ-001", "scenario": "exception 异常诊断", "precondition": "输入无效或依赖不可用", "expected": "系统进入可诊断失败处理路径", "evidence": source_uid},
                     ],
@@ -365,33 +399,36 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
                 "boundary_confirmation": {"personal_draft_only": True, "writes_formal_artifacts": False, "generates_code_patch": False, "uses_patch_apply": False},
             }
         if artifact_type == "functional_spec":
-            content = (
-                "# 功能规范\n\n"
-                "## 功能目标\n"
-                f"- 基于来源证据 {source_uid} 定义用户可观察的功能行为。\n\n"
-                "## 用户可观察行为\n"
-                "- 输入条件、输出结果、异常提示和验收路径均以用户可验证行为表达。\n\n"
-                "## 输入与输出\n"
-                "- 输入来自当前需求材料或本轮用户描述；输出为用户可验证的功能结果、提示或状态变化。\n\n"
-                "## 状态与异常场景\n"
-                "- 覆盖正常状态、边界状态和异常输入下的外部可观察响应。\n\n"
-                "## 非目标\n"
-                "- 不包含代码级实现、具体函数逻辑、内部算法、可应用补丁或正式发布动作。\n\n"
-                "## 验收标准\n"
-                "- 评审时可依据输入、输出、异常响应和证据引用逐项确认。\n"
-                + revision_line
-                + "\n"
-                + ("## 长期经验\n" + "".join(f"- 长期经验：{rule}\n" for rule in long_term_rules) + "\n" if long_term_rules else "")
-                + (
-                    "## 行为规则注入\n"
-                    + "".join(f"- 本会话即时遵守：{rule}" + (f"（candidate:{candidate_id}）" if candidate_id else "") + "\n" for rule, candidate_id in immediate_rules)
-                    + "\n"
+            content = "".join(
+                [
+                    "# 功能规范\n\n",
+                    "## 功能目标\n",
+                    f"- 基于来源证据 {source_uid} 定义用户可观察的功能行为。\n\n",
+                    "## 用户可观察行为\n",
+                    "- 输入条件、输出结果、异常提示和验收路径均以用户可验证行为表达。\n\n",
+                    ("## 会话确认结论\n" + "".join(f"{line}\n" for line in conversation_lines) + "\n") if conversation_lines else "",
+                    "## 输入与输出\n",
+                    "- 输入来自当前需求材料或本轮用户描述；输出为用户可验证的功能结果、提示或状态变化。\n\n",
+                    "## 状态与异常场景\n",
+                    "- 覆盖正常状态、边界状态和异常输入下的外部可观察响应。\n\n",
+                    "## 非目标\n",
+                    "- 不包含代码级实现、具体函数逻辑、内部算法、可应用补丁或正式发布动作。\n\n",
+                    ("## 冲突留痕\n" + "".join(f"{line}\n" for line in conflict_lines) + "\n") if conflict_lines else "",
+                    "## 验收标准\n",
+                    "- 评审时可依据输入、输出、异常响应和证据引用逐项确认。\n",
+                    revision_line,
+                    "\n",
+                    ("## 长期经验\n" + "".join(f"- 长期经验：{rule}\n" for rule in long_term_rules) + "\n") if long_term_rules else "",
+                    (
+                        "## 行为规则注入\n"
+                        + "".join(f"- 本会话即时遵守：{rule}\n" for rule, _candidate_id in immediate_rules)
+                        + "\n"
+                    )
                     if immediate_rules
-                    else ""
-                )
-                +
-                "## 证据引用\n"
-                f"- source: {source_uid}\n"
+                    else "",
+                    "## 证据引用\n",
+                    f"- source: {source_uid}\n",
+                ]
             )
         elif artifact_type == "requirement_analysis_report":
             semantic_model = payload.get("source_semantic_model") if isinstance(payload.get("source_semantic_model"), dict) else {}
@@ -429,97 +466,113 @@ def fake_completion(purpose: str, user_prompt: str) -> dict[str, Any]:
                 "- 若源文存在拼写、符号或状态值歧义，需要保留原文并待确认。",
                 "- 若语义骨架无法抽取完整变量定义或状态前置条件，需要回到源文补充证据。",
             ]
-            content = (
-                "# 需求分析报告\n\n"
-                "## 输入摘要\n"
-                f"- 来源证据：{source_uid}\n"
-                "- 文档目标：分析输入需求的事实、变量定义、状态条件、控制策略边界和验收线索。\n\n"
-                "## 原文事实表\n"
-                + "".join(f"- {line}\n" for line in source_facts)
-                + "\n"
-                "## 术语与变量定义\n"
-                + "\n".join(term_lines)
-                + "\n"
-                "## 需求理解\n"
-                "- 本需求需要优先保持源文定义和状态前置条件，再组织控制策略说明。\n"
-                "- 需求分析聚焦外部可观察行为，不补写实现代码或控制算法细节。\n\n"
-                "## 条件与状态机\n"
-                "| 阶段 | 状态判定条件 | 控制对象 | 二级条件 | 输出策略 | 退出/完成条件 | 证据引用 |\n"
-                "| --- | --- | --- | --- | --- | --- | --- |\n"
-                + "\n".join(branch_lines)
-                + "\n\n"
-                "## 歧义与待确认\n"
-                + "".join(f"{line}\n" for line in ambiguities)
-                + "\n"
-                "## 关键假设\n"
-                "- 未明确给出的状态机抖动处理、信号消抖和异常降级策略，暂作为后续澄清项。\n\n"
-                "## 风险与边界\n"
-                "- 温度边界值（15℃、37℃、40℃、60℃、20℃）需要精确定义夹紧和归属规则。\n"
-                "- 传感器异常、状态信号不一致和线性区间外输入需要在后续设计阶段补全处理策略。\n\n"
-                "## 验收建议\n"
-                "- 需要按状态分支、边界值、完成后 10 分钟逻辑以及信号组合变化进行验收。\n"
-                "- 后续功能规范与测试用例应基于原文事实表，不得将待确认项直接当作已确认事实。\n\n"
-                "## 证据引用\n"
-                f"- source: {source_uid}\n"
+            content = "".join(
+                [
+                    "# 需求分析报告\n\n",
+                    "## 输入摘要\n",
+                    f"- 来源证据：{source_uid}\n",
+                    "- 文档目标：分析输入需求的事实、变量定义、状态条件、控制策略边界和验收线索。\n\n",
+                    "## 原文事实表\n",
+                    "".join(f"- {line}\n" for line in source_facts),
+                    "\n",
+                    "## 术语与变量定义\n",
+                    "\n".join(term_lines),
+                    "\n",
+                    "## 需求理解\n",
+                    "- 本需求需要优先保持源文定义和状态前置条件，再组织控制策略说明。\n",
+                    "- 需求分析聚焦外部可观察行为，不补写实现代码或控制算法细节。\n\n",
+                    ("## 会话确认结论\n" + "".join(f"{line}\n" for line in conversation_lines) + "\n") if conversation_lines else "",
+                    "## 条件与状态机\n",
+                    "| 阶段 | 状态判定条件 | 控制对象 | 二级条件 | 输出策略 | 退出/完成条件 | 证据引用 |\n",
+                    "| --- | --- | --- | --- | --- | --- | --- |\n",
+                    "\n".join(branch_lines),
+                    "\n\n",
+                    "## 歧义与待确认\n",
+                    "".join(f"{line}\n" for line in ambiguities),
+                    "\n",
+                    "## 关键假设\n",
+                    "- 未明确给出的状态机抖动处理、信号消抖和异常降级策略，暂作为后续澄清项。\n\n",
+                    ("## 源文冲突留痕\n" + "".join(f"{line}\n" for line in conflict_lines) + "\n") if conflict_lines else "",
+                    "## 风险与边界\n",
+                    "- 温度边界值（15℃、37℃、40℃、60℃、20℃）需要精确定义夹紧和归属规则。\n",
+                    "- 传感器异常、状态信号不一致和线性区间外输入需要在后续设计阶段补全处理策略。\n\n",
+                    "## 验收建议\n",
+                    "- 需要按状态分支、边界值、完成后 10 分钟逻辑以及信号组合变化进行验收。\n",
+                    "- 后续功能规范与测试用例应基于原文事实表，不得将待确认项直接当作已确认事实。\n\n",
+                    "## 证据引用\n",
+                    f"- source: {source_uid}\n",
+                ]
             )
         elif artifact_type == "detailed_design":
-            content = (
-                "# 软件详细设计\n\n"
-                "## 模块职责\n"
-                "- 基于需求输入划分职责、接口和状态边界。\n\n"
-                "## 接口与数据\n"
-                "- 接口和数据流需要绑定代码证据后细化。\n\n"
-                "## 状态与错误处理\n"
-                "- 无效输入、依赖不可用和默认值策略需要与调用方可观察行为保持一致。\n\n"
-                "## Codebase Impact 证据\n"
-                f"- impact_analyze.passed: {bool(code_impact.get('passed'))}\n"
-                f"- symbols: {symbol_text}\n\n"
-                "## Symbol Lookup 证据\n"
-                f"- {symbol_text}\n\n"
-                "## Call Graph 证据\n"
-                "- call graph evidence carried from context when available\n\n"
-                "## Include Impact 证据\n"
-                "- include impact evidence carried from context when available\n\n"
-                "## Macro / Type / Variable 证据\n"
-                "- macro/type/variable evidence carried from context when available\n\n"
-                "## 代码影响上下文\n"
-                "- 设计判断必须回到上述代码影响、符号、调用、include 以及宏/类型/变量证据。\n\n"
-                "## 安全边界\n"
-                "- 本草稿只描述设计，不生成 C 代码 patch，不生成可应用代码补丁。\n"
+            content = "".join(
+                [
+                    "# 软件详细设计\n\n",
+                    "## 模块职责\n",
+                    "- 基于需求输入划分职责、接口和状态边界。\n\n",
+                    ("## 会话确认结论\n" + "".join(f"{line}\n" for line in conversation_lines) + "\n") if conversation_lines else "",
+                    "## 接口与数据\n",
+                    "- 接口和数据流需要绑定代码证据后细化。\n\n",
+                    "## 状态与错误处理\n",
+                    "- 无效输入、依赖不可用和默认值策略需要与调用方可观察行为保持一致。\n\n",
+                    ("## 源文冲突留痕\n" + "".join(f"{line}\n" for line in conflict_lines) + "\n") if conflict_lines else "",
+                    "## Codebase Impact 证据\n",
+                    f"- impact_analyze.passed: {bool(code_impact.get('passed'))}\n",
+                    f"- symbols: {symbol_text}\n\n",
+                    "## Symbol Lookup 证据\n",
+                    f"- {symbol_text}\n\n",
+                    "## Call Graph 证据\n",
+                    "- call graph evidence carried from context when available\n\n",
+                    "## Include Impact 证据\n",
+                    "- include impact evidence carried from context when available\n\n",
+                    "## Macro / Type / Variable 证据\n",
+                    "- macro/type/variable evidence carried from context when available\n\n",
+                    "## 代码影响上下文\n",
+                    "- 设计判断必须回到上述代码影响、符号、调用、include 以及宏/类型/变量证据。\n\n",
+                    "## 安全边界\n",
+                    "- 本草稿只描述设计，不生成 C 代码 patch，不生成可应用代码补丁。\n",
+                ]
             )
         elif artifact_type == "requirement_breakdown":
-            content = (
-                "# 需求拆解\n\n"
-                "## 候选需求条目\n"
-                f"1. REQ-001: 基于来源证据 {source_uid} 定义单一职责需求。\n\n"
-                "## 触发条件\n"
-                "- 由输入材料描述的用户动作、系统状态或外部事件触发。\n\n"
-                "## 预期行为\n"
-                "- 系统产生可验证、可追溯的外部行为。\n\n"
-                "## 验收标准\n"
-                "- 每条需求需要可验证、可追溯、可评审。\n\n"
-                "## 证据引用\n"
-                f"- source: {source_uid}\n"
+            content = "".join(
+                [
+                    "# 需求拆解\n\n",
+                    "## 候选需求条目\n",
+                    f"1. REQ-001: 基于来源证据 {source_uid} 定义单一职责需求。\n\n",
+                    ("## 会话确认结论\n" + "".join(f"{line}\n" for line in conversation_lines) + "\n") if conversation_lines else "",
+                    "## 触发条件\n",
+                    "- 由输入材料描述的用户动作、系统状态或外部事件触发。\n\n",
+                    "## 预期行为\n",
+                    "- 系统产生可验证、可追溯的外部行为。\n\n",
+                    ("## 源文冲突留痕\n" + "".join(f"{line}\n" for line in conflict_lines) + "\n") if conflict_lines else "",
+                    "## 验收标准\n",
+                    "- 每条需求需要可验证、可追溯、可评审。\n\n",
+                    "## 证据引用\n",
+                    f"- source: {source_uid}\n",
+                ]
             )
         else:
-            content = (
-                "# 需求分析报告\n\n"
-                "## 输入摘要\n"
-                f"- 来源证据：{source_uid}\n\n"
-                "## 需求理解\n"
-                "- 识别功能目标、约束、异常场景和验收线索。\n"
-                + revision_line
-                + "\n"
-                "## 关键假设\n"
-                "- 当前草稿仅基于本轮输入材料，未确认的信息标记为待澄清。\n\n"
-                "## 风险与边界\n"
-                "- 本结果仅写入 personal draft，不进入正式发布记录。\n\n"
-                "## 待澄清问题\n"
-                "- 需要确认边界条件、异常处理和验收口径。\n\n"
-                "## 验收建议\n"
-                "- 基于来源证据逐项评审输入、输出、异常和边界覆盖。\n\n"
-                "## 证据引用\n"
-                f"- source: {source_uid}\n"
+            content = "".join(
+                [
+                    "# 需求分析报告\n\n",
+                    "## 输入摘要\n",
+                    f"- 来源证据：{source_uid}\n\n",
+                    ("## 会话确认结论\n" + "".join(f"{line}\n" for line in conversation_lines) + "\n") if conversation_lines else "",
+                    "## 需求理解\n",
+                    "- 识别功能目标、约束、异常场景和验收线索。\n",
+                    revision_line,
+                    "\n",
+                    "## 关键假设\n",
+                    "- 当前草稿仅基于本轮输入材料，未确认的信息标记为待澄清。\n\n",
+                    ("## 源文冲突留痕\n" + "".join(f"{line}\n" for line in conflict_lines) + "\n") if conflict_lines else "",
+                    "## 风险与边界\n",
+                    "- 本结果仅写入 personal draft，不进入正式发布记录。\n\n",
+                    "## 待澄清问题\n",
+                    "- 需要确认边界条件、异常处理和验收口径。\n\n",
+                    "## 验收建议\n",
+                    "- 基于来源证据逐项评审输入、输出、异常和边界覆盖。\n\n",
+                    "## 证据引用\n",
+                    f"- source: {source_uid}\n",
+                ]
             )
         return {
             "title": str(current_draft.get("title") or "") or {
@@ -594,6 +647,52 @@ def _extract_llm_status_from_prompt(prompt: str) -> dict[str, str]:
         "model": match.group(2).strip(),
         "fake_provider": match.group(3).strip(),
     }
+
+
+def _fake_conversation_topic_key(statement: str) -> str:
+    text = re.sub(r"\s+", " ", str(statement or "").lower())
+    if "超时" in text or "时延" in text or "延迟" in text:
+        return "timeout"
+    if "返回结构" in text or "json" in text or "xml" in text:
+        return "response_format"
+    if "字段命名" in text:
+        return "field_naming"
+    if "测试用例" in text and "重试" in text:
+        return "test_case|retry"
+    replacements = [
+        ("延迟", "latency"),
+        ("时延", "latency"),
+        ("超时", "timeout"),
+        ("重试", "retry"),
+        ("并发", "concurrency"),
+        ("缓存", "cache"),
+        ("日志", "logging"),
+        ("错误码", "error_code"),
+        ("返回码", "error_code"),
+        ("来源", "source"),
+        ("证据", "evidence"),
+        ("标题", "title"),
+        ("状态", "state"),
+        ("边界", "boundary"),
+        ("异常", "exception"),
+        ("测试", "test"),
+    ]
+    normalized = text
+    for left, right in replacements:
+        normalized = normalized.replace(left, right)
+    tokens = re.findall(r"[a-z0-9_./+-]+|[\u4e00-\u9fff]{2,8}", normalized)
+    result = []
+    for token in tokens:
+        token = token.strip("_- ")
+        if len(token) < 2:
+            continue
+        if token in {"需要", "必须", "应该", "默认", "继续", "当前", "内容", "文档"}:
+            continue
+        if token not in result:
+            result.append(token)
+    if not result:
+        return "topic_general"
+    return "|".join(result[:6])
 
 
 def _semantic_intent(question: str) -> str:

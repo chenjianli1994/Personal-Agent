@@ -12,6 +12,7 @@ from personal_agent.core.utils import json_dumps
 from .content_guard import assert_personal_content_clean, personal_forbidden_hits
 from .artifact_quality import validate_generated_artifact
 from .artifact_drafts import DOCUMENT_LINEAGE_ORDER, create_artifact_draft, get_artifact_content, get_artifact_draft, revise_artifact_draft_manual
+from .conversation_evidence import build_conversation_evidence_snapshot, sanitize_conversation_evidence_for_prompt
 from .knowledge_recall import billable_memory_item_uids, recall_knowledge, record_recall_feedback, safe_recall_prompt_item
 from .knowledge_learning import pending_session_memory_candidates
 from .source_semantic_model import build_source_semantic_model
@@ -68,7 +69,8 @@ def propose_personal_artifact(
         project_id=project_id,
         prompt=prompt,
         source_uids=source_uids,
-        session_task_uid=session_uid or session_task_uid,
+        session_uid=session_uid or session_task_uid,
+        task_uid=task_uid,
         document_type=document_type,
     )
     template = load_default_template(workspace=workspace_path, skill=skill)
@@ -130,6 +132,11 @@ def propose_personal_artifact(
                 "quality_gate_passed": quality_passed,
                 "quality_gate_status": "passed" if quality_passed else "failed",
                 "evidence_refs": context["evidence_refs"],
+                "conversation_scope_key": context.get("conversation_scope_key") or "",
+                "conversation_evidence_version": context.get("conversation_evidence_version") or "",
+                "conversation_evidence_used": context.get("active_conversation_decisions") or [],
+                "weak_conversation_references": context.get("weak_conversation_references") or [],
+                "conversation_conflicts": context.get("conversation_conflicts") or [],
                 "knowledge_refs": context["knowledge_refs"],
                 "memory_refs": context["memory_refs"],
                 "memory_item_uids_used": generated.get("memory_item_uids_used") or [],
@@ -154,6 +161,11 @@ def propose_personal_artifact(
         "document_type": document_type,
         "content_format": generated["content_format"],
         "evidence_refs": context["evidence_refs"],
+        "conversation_scope_key": context.get("conversation_scope_key") or "",
+        "conversation_evidence_version": context.get("conversation_evidence_version") or "",
+        "conversation_evidence_used": context.get("active_conversation_decisions") or [],
+        "weak_conversation_references": context.get("weak_conversation_references") or [],
+        "conversation_conflicts": context.get("conversation_conflicts") or [],
         "knowledge_refs": context["knowledge_refs"],
         "memory_refs": context["memory_refs"],
         "memory_item_uids_used": generated.get("memory_item_uids_used") or [],
@@ -185,6 +197,7 @@ def revise_personal_artifact(
         raise ValueError("feedback is required")
     draft = get_artifact_draft(db_path, project_id=project_id, draft_uid=draft_uid)
     actual_current_revision = int(draft["current_revision"])
+    effective_session_uid = session_uid or str(draft.get("session_uid") or "") or session_task_uid
     if base_revision_index is not None:
         if base_revision_index <= 0:
             raise ValueError("base_revision_index must be positive")
@@ -203,7 +216,8 @@ def revise_personal_artifact(
         project_id=project_id,
         prompt=feedback,
         source_uids=source_uids,
-        session_task_uid=session_uid or session_task_uid,
+        session_uid=effective_session_uid,
+        task_uid=task_uid or str(draft.get("task_uid") or ""),
         document_type=document_type,
     )
     if isinstance(current_generation, dict):
@@ -266,6 +280,11 @@ def revise_personal_artifact(
             "quality_gate_passed": quality_passed,
             "quality_gate_status": "passed" if quality_passed else "failed",
             "evidence_refs": context["evidence_refs"],
+            "conversation_scope_key": context.get("conversation_scope_key") or "",
+            "conversation_evidence_version": context.get("conversation_evidence_version") or "",
+            "conversation_evidence_used": context.get("active_conversation_decisions") or [],
+            "weak_conversation_references": context.get("weak_conversation_references") or [],
+            "conversation_conflicts": context.get("conversation_conflicts") or [],
             "knowledge_refs": context["knowledge_refs"],
             "memory_refs": context["memory_refs"],
             "memory_item_uids_used": revised.get("memory_item_uids_used") or [],
@@ -367,7 +386,8 @@ def propose_personal_unit_test_code(
         project_id=project_id,
         prompt=prompt,
         source_uids=source_uids,
-        session_task_uid=session_uid or session_task_uid,
+        session_uid=session_uid or session_task_uid,
+        task_uid=task_uid,
         document_type="unit_test_code_or_diff",
     )
     content = _unit_test_code_or_diff(context)
@@ -451,37 +471,70 @@ def _generation_context(
     project_id: int,
     prompt: str,
     source_uids: list[str] | None,
-    session_task_uid: str = "",
+    session_uid: str = "",
+    task_uid: str = "",
     document_type: str = "",
 ) -> dict[str, Any]:
+    active_draft_uid = ""
+    scope_session_uid = str(session_uid or "").strip()
+    scope_task_uid = str(task_uid or "").strip()
+    if scope_session_uid:
+        with connect(db_path) as conn:
+            session_row = conn.execute(
+                """
+                SELECT active_draft_uid
+                FROM personal_sessions
+                WHERE session_uid=? AND status='active'
+                """,
+                (scope_session_uid,),
+            ).fetchone()
+        if session_row is not None:
+            active_draft_uid = str(session_row["active_draft_uid"] or "")
     sources = _load_sources(db_path, project_id=project_id, source_uids=source_uids)
     knowledge = recall_knowledge(db_path, project_id=project_id, query=prompt, limit=5, exclude_category="memory_lesson")
     memories = recall_knowledge(db_path, project_id=project_id, query=prompt, limit=5, category="memory_lesson")
     prompt_memories = [safe_item for item in memories if (safe_item := safe_recall_prompt_item(item, forbidden_text_checker=personal_forbidden_hits))]
     billable_memory_uids = set(billable_memory_item_uids(prompt_memories))
     billable_prompt_memories = [item for item in prompt_memories if item.get("item_uid") in billable_memory_uids]
-    session_memories = pending_session_memory_candidates(db_path, project_id=project_id, task_uid=session_task_uid, session_uid=session_task_uid)
+    session_memories = pending_session_memory_candidates(
+        db_path,
+        project_id=project_id,
+        task_uid=scope_task_uid,
+        session_uid=scope_session_uid,
+    )
     session_skill_candidates = [
         item
         for item in list_skill_update_candidates(db_path, project_id=project_id, status="candidate")
-        if item.get("session_uid") == session_task_uid
-    ] if session_task_uid else []
+        if item.get("session_uid") == scope_session_uid
+    ] if scope_session_uid else []
     source_semantic_model = (
         build_source_semantic_model(
             db_path,
             project_id=project_id,
             prompt=prompt,
             sources=sources,
-            session_task_uid=session_task_uid,
+            session_task_uid=scope_task_uid or scope_session_uid,
         )
         if document_type == "requirement_analysis_report"
         else {"defined_terms": [], "state_phases": [], "control_branches": [], "open_questions": [], "llm": {}}
+    )
+    conversation_evidence_snapshot = build_conversation_evidence_snapshot(
+        db_path,
+        project_id=project_id,
+        session_uid=scope_session_uid,
+        document_type=document_type,
+        active_source_uids=[item["source_uid"] for item in sources],
+        sources=sources,
+        task_uid=scope_task_uid,
+        active_draft_uid=active_draft_uid,
     )
     return {
         "db_path": db_path,
         "project_id": project_id,
         "prompt": prompt.strip(),
-        "session_task_uid": session_task_uid,
+        "session_uid": scope_session_uid,
+        "task_uid": scope_task_uid,
+        "session_task_uid": scope_task_uid or scope_session_uid,
         "sources": sources,
         "source_uids": [item["source_uid"] for item in sources],
         "knowledge_refs": [{"item_uid": item["item_uid"], "title": item["title"]} for item in knowledge],
@@ -494,10 +547,11 @@ def _generation_context(
         "session_memories": session_memories,
         "session_skill_update_candidates": session_skill_candidates,
         "source_semantic_model": source_semantic_model,
+        **sanitize_conversation_evidence_for_prompt(conversation_evidence_snapshot),
         "upstream_drafts": _upstream_drafts(
             db_path,
             project_id=project_id,
-            session_uid=session_task_uid,
+            session_uid=scope_session_uid,
             document_type=document_type,
         ),
         "evidence_refs": {
@@ -506,6 +560,9 @@ def _generation_context(
             "approved_memory_uids": [item["item_uid"] for item in prompt_memories],
             "session_memory_candidate_ids": [item["id"] for item in session_memories],
             "session_skill_update_candidate_ids": [item["id"] for item in session_skill_candidates],
+            "conversation_scope_key": conversation_evidence_snapshot["conversation_scope_key"],
+            "conversation_evidence_version": conversation_evidence_snapshot["conversation_evidence_version"],
+            "conversation_message_count": len(conversation_evidence_snapshot["conversation_evidence"]),
         },
         "impact": _detailed_design_impact(db_path, project_id, prompt) if document_type in IMPACT_ENABLED_DOCUMENT_TYPES else {},
     }

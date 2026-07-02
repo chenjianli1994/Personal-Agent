@@ -204,7 +204,7 @@ def test_personal_learning_candidate_immediate_and_approved_memory_flow(tmp_path
     draft_uid = immediate.json()["draft_uid"]
     draft = client.get(f"/api/personal/artifacts/{draft_uid}").json()
     assert "本会话即时遵守：功能规范不要写实现细节" in draft["content"]
-    assert "candidate:" in draft["content"]
+    assert "candidate:" not in draft["content"]
 
     approved = client.post(
         f"/api/personal/learning/candidates/{candidate_id}/approve",

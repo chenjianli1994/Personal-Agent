@@ -1191,6 +1191,149 @@ def test_directional_revision_quality_failure_creates_no_revision(tmp_path: Path
         assert conn.execute("SELECT COUNT(*) FROM personal_draft_revisions WHERE draft_uid=?", (draft_uid,)).fetchone()[0] == 2
 
 
+def test_conversation_evidence_flows_to_all_document_types_and_metadata(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    monkeypatch.setenv("PERSONAL_AGENT_ENABLE_FAKE_LLM", "1")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    session = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()["session"]["session_uid"]
+    client.post("/api/personal/chat/turn", json={"session_uid": session, "content": "返回结构统一使用 JSON。"})
+    source = client.post("/api/personal/sources/text", json={"title": "接口说明", "content": "源文原始描述写的是 XML。"})
+    source_uid = source.json()["source_uid"]
+
+    response = client.post(
+        "/api/personal/documents/propose",
+        json={"prompt": "生成功能规范", "document_type": "functional_spec", "session_uid": session, "source_uids": [source_uid]},
+    )
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    generation = payload["metadata"]["generation"]
+
+    assert "会话确认结论" in payload["content"]
+    assert "返回结构统一使用 JSON" in payload["content"]
+    assert "源文原始描述写的是 XML" in payload["content"]
+    assert generation["conversation_scope_key"]
+    assert generation["conversation_evidence_version"] == "conversation_evidence_v3"
+    assert generation["conversation_evidence_used"]
+    assert generation["conversation_conflicts"]
+
+
+def test_conversation_evidence_revision_overrides_same_topic_previous_statement(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    monkeypatch.setenv("PERSONAL_AGENT_ENABLE_FAKE_LLM", "1")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    session = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()["session"]["session_uid"]
+    client.post("/api/personal/chat/turn", json={"session_uid": session, "content": "超时默认 30 秒。"})
+    created = client.post(
+        "/api/personal/documents/propose",
+        json={"prompt": "生成功能规范", "document_type": "functional_spec", "session_uid": session},
+    )
+    assert created.status_code == 200, created.json()
+    draft_uid = created.json()["draft_uid"]
+
+    client.post("/api/personal/chat/turn", json={"session_uid": session, "content": "超时改成 45 秒。"})
+    revised = client.post(
+        f"/api/personal/drafts/{draft_uid}/revise",
+        json={"feedback": "按最新结论更新"},
+    )
+    assert revised.status_code == 200, revised.json()
+    payload = revised.json()
+    generation = payload["metadata"]["generation"]
+
+    assert "超时改成 45 秒" in payload["content"]
+    assert "超时默认 30 秒" not in payload["content"]
+    assert any(item["statement"] == "超时改成 45 秒" for item in generation["conversation_evidence_used"])
+    assert all(item["statement"] != "超时默认 30 秒" for item in generation["conversation_evidence_used"])
+
+
+def test_conversation_evidence_prefers_task_scope_when_session_and_task_coexist(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    monkeypatch.setenv("PERSONAL_AGENT_ENABLE_FAKE_LLM", "1")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    session = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()["session"]["session_uid"]
+    client.post("/api/personal/chat/turn", json={"session_uid": session, "content": "接口超时默认 30 秒。"})
+
+    response = client.post(
+        "/api/personal/documents/propose",
+        json={
+            "prompt": "生成功能规范",
+            "document_type": "functional_spec",
+            "session_uid": session,
+            "task_uid": "task_scope_priority",
+        },
+    )
+    assert response.status_code == 200, response.json()
+    generation = response.json()["metadata"]["generation"]
+
+    assert generation["conversation_scope_key"] == "task:task_scope_priority"
+    assert any(item["statement"] == "接口超时默认 30 秒" for item in generation["conversation_evidence_used"])
+
+
+def test_tentative_conversation_reference_stays_weak_and_does_not_enter_body_fact(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    monkeypatch.setenv("PERSONAL_AGENT_ENABLE_FAKE_LLM", "1")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    session = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()["session"]["session_uid"]
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO personal_session_messages(message_uid, session_uid, role, content, metadata_json, created_at)
+            VALUES ('msg_fixture_tentative', ?, 'assistant', ?, '{}', datetime('now'))
+            """,
+            (session, "返回结构使用 JSON。建议后续再确认字段命名。"),
+        )
+
+    response = client.post(
+        "/api/personal/documents/propose",
+        json={"prompt": "生成功能规范", "document_type": "functional_spec", "session_uid": session},
+    )
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    generation = payload["metadata"]["generation"]
+
+    assert "返回结构使用 JSON" in payload["content"]
+    assert "建议后续再确认字段命名" not in payload["content"]
+    assert any(item["statement"] == "建议后续再确认字段命名" for item in generation["weak_conversation_references"])
+
+
+def test_non_requirement_document_type_receives_conversation_evidence(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
+    monkeypatch.setenv("PERSONAL_AGENT_ENABLE_FAKE_LLM", "1")
+    db_path = tmp_path / "agent.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = TestClient(create_personal_app(db_path, workspace))
+
+    session = client.post("/api/personal/chat/turn", json={"content": "创建会话"}).json()["session"]["session_uid"]
+    client.post("/api/personal/chat/turn", json={"session_uid": session, "content": "测试用例需要覆盖超时重试。"})
+
+    response = client.post(
+        "/api/personal/documents/propose",
+        json={"prompt": "生成测试用例", "document_type": "test_case_spec", "session_uid": session},
+    )
+    assert response.status_code == 200, response.json()
+    payload = response.json()
+    rows = __import__("json").loads(payload["content"])["rows"]
+    assert any("超时重试" in str(row["expected"]) for row in rows)
+    generation = payload["metadata"]["generation"]
+    assert generation["conversation_evidence_used"]
+
+
 def test_lineage_uses_active_upstream_and_excludes_quality_failed(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("PERSONAL_AGENT_LLM_PROVIDER", "fake")
     db_path = tmp_path / "agent.db"

@@ -1,6 +1,6 @@
 # PersonalAgent 项目上下文
 
-更新时间：2026-06-26
+更新时间：2026-07-02
 
 本文档是项目的长期上下文账本，用于维护“下一步要做什么、已经做完什么、哪些方案已经证实不适合继续走、项目沉淀了哪些经验”。新会话应先读 `PROJECT_HANDOFF.md`、`AGENTS.md`、本文档，再读具体设计方案和代码入口。
 
@@ -43,6 +43,22 @@
   - Q6：增加全局异常处理器，统一 500 错误响应。
   - Q7：巨型模块随改随拆，不单独做高风险大重构。
 - 落地要求：分阶段实施；每阶段完成后做实现核对；阶段完成情况需要同步写回本文档。
+
+### P1.5：会话关键证据层 v3 落地
+
+- 状态：已完成。
+- 依据文档：`设计方案/会话关键证据层v3方案.md`。
+- 目标：让当前任务/草稿目标下已经形成的用户约束与 assistant 明确结论进入文档生成主链路，成为高优先级关键证据，解决“多轮对话已收敛的结论在最终文档里丢失主导权”的问题。
+- 计划范围：
+  - 新增独立的 conversation evidence 能力，不复用长期学习链路。
+  - 证据作用域挂在任务/草稿目标上，不挂在短期聊天片段上。
+  - 用户明确约束、修正、补充默认进入关键证据。
+  - assistant 明确结论句默认进入关键证据，试探句默认只作弱参考。
+  - assistant 混合回复按句切分，只提取明确结论句。
+  - 同题结论按最后版本覆盖旧版本，中途插入其他话题不使其失效。
+  - 所有文档类型接入 conversation evidence，上下文、质量门和 metadata 全链路生效。
+  - 文档正文不得泄漏内部 evidence id、candidate id、session memory id。
+- 落地要求：实现、测试、上下文同步和审查必须完整闭环；完成后要补充验证结果与经验教训。
 
 ### P2：当前草稿页关系认知优化
 
@@ -125,6 +141,37 @@
   - deleted 草稿不再参与候选序号、当前采用候选、激活、修订、导出和普通上下文；删除会话当前草稿时会清空 `personal_sessions.active_draft_uid`，不自动选择替代草稿。
   - 前端当前草稿页新增“回收站”筛选、单份移入回收站、恢复、危险确认弹窗，以及仅面向历史候选/未关联草稿的批量移入回收站入口。
   - 回收站模式下关闭激活、修订、重新生成、打开/下载等普通工作流动作，只保留查看、复制、版本和恢复。
+
+### 会话关键证据层 v3 落地
+
+- 状态：已完成。
+- 完成时间：2026-07-02。
+- 相关文档：`设计方案/会话关键证据层v3方案.md`。
+- 结果摘要：
+  - 新增独立模块 `personal_agent/conversation_evidence.py`，从 `personal_session_messages` 动态构建 conversation evidence，不复用 `memory_candidates`、`session_memories` 或长期学习链路。
+  - 证据作用域按 `task_uid -> active_draft_uid -> session_uid + document_type + active_source_uids 指纹` 分层构建，保证任务/草稿目标优先，中途切话题不使既有结论失效，只有同题新版本覆盖旧版本。
+  - user 明确约束/修正/补充默认进入 active conversation decisions；assistant 句级切分后仅明确结论句进入 active，试探句进入 weak references。
+  - `artifact_generation`、`skill_runtime`、`artifact_quality` 全链路接入 `active_conversation_decisions`、`weak_conversation_references`、`conversation_conflicts` 与 `conversation_scope_key`。
+  - 所有文档类型统一接入 conversation evidence，不再只对 `requirement_analysis_report` 特判；`functional_spec`、`test_case_spec` 等非需求分析文档也可直接消费会话结论。
+  - draft `metadata.generation` 新增 conversation evidence 快照字段，记录本次生成/修订实际使用的会话证据、弱参考、冲突留痕与版本号，不做数据库 schema 迁移。
+  - `artifact_quality` 新增 conversation evidence 质量门：已生效会话结论必须进入正文、weak reference 不得被提升为确认事实、会话与源文冲突必须留痕、正文不得泄漏 evidence uid / candidate id / session memory id / message uid。
+  - `fake_llm_provider` 补齐 `personal_conversation_evidence_model` fixture，并让离线文档生成遵守会话结论优先、源文冲突留痕、弱参考不进正文事实层。
+- 验证结果：
+  - `.\.venv\Scripts\python.exe -m pytest -q` -> `220 passed, 1 warning`
+  - `.\.venv\Scripts\python.exe -m pytest tests\test_personal_forbidden_scan.py -q` -> `2 passed`
+  - `frontend` 下 `npm run typecheck` -> 通过
+  - 审查修复后新增定向验证：
+    - `tests/test_conversation_evidence.py` -> `5 passed`
+    - `tests/test_personal_artifact_quality.py` -> `7 passed`
+    - `tests/test_personal_llm_artifact_generation.py` -> `27 passed`
+    - `tests/test_personal_learning_knowledge.py` -> `14 passed`
+    - `tests/test_personal_agent_api.py` -> `30 passed`
+  - `gpt-5.4 high` 子 agent 审查指出的真实链路问题已修复并回归验证通过：
+    - assistant `general/input_source/document_generation/draft_revision` 等真实上下文不再被 conversation evidence 误跳过。
+    - 生成/修订链路改为显式区分 `session_uid` 与 `task_uid`，conversation scope 恢复 `task -> draft -> session+document+sources` 优先级。
+    - user 侧 evidence 过滤收紧，流程推进句、普通问题句不再污染 active decisions。
+    - weak reference 允许以“待确认/风险/说明”形式留在正文，但不会被当作已确认事实。
+    - fake provider 不再向用户可见正文泄漏 `candidate id`。
 
 ### 当前草稿页优化
 
@@ -230,6 +277,13 @@
 - 删除当前采用候选的影响提示必须以后端实时重算结果为准；前端只能展示 impact，不能缓存或复写候选关系判断。
 - 回收站模式应与普通草稿模式严格隔离，激活、修订、重新生成、打开/下载等动作要集中收敛，避免 UI 上出现“已删除但还能继续工作流”的错觉。
 - 质量失败、阻塞、修复候选、学习候选都应默认走 candidate/approval 机制，不直接沉淀为 approved 事实。
+- 会话关键证据层的事实源应优先取 `personal_session_messages`，不要把学习候选、长期记忆或 session summary 混成同一种“会话事实”。
+- 会话关键证据的持久化首选“生成前动态构建 + 生成后写入 draft metadata / revision metadata 快照”，首版不需要为了可追溯性先做 schema 迁移。
+- 若修订接口未显式传入 `session_uid`，应从目标 draft 回填 `session_uid` 参与 conversation evidence 作用域计算，否则修订链会丢失已生效会话结论。
+- conversation evidence 新增 LLM purpose 后，依赖 `llm_call_logs` 最近调用顺序的测试需要改成断言“包含必要 purpose”，避免对调用数量和顺序做过窄假设。
+- assistant 会话证据提取不能靠“排除常见上下文”实现，否则真实 runtime 里最重要的 assistant 结论会被整批漏掉；应只排除明确的流程提示、fallback 和带 draft payload 的包装消息。
+- conversation evidence 的 scope 语义必须在生成、修订、runtime、route 这几层始终显式传递，不能再把 `session_uid` 和 `task_uid` 混成一个“session_task_uid”偷懒复用。
+- weak reference 的 prompt 契约、fake provider 与 quality gate 必须共享同一行为合同；如果 prompt 允许“待确认/风险”落文，质量门就不能简单做成“正文完全不得出现”。
 - 单用户本地工具不需要过度设计高并发架构，但 SQLite 长耗时写入和前端轮询会产生真实锁冲突风险，WAL 和 `busy_timeout` 仍有价值。
 - 大模块存在但不宜为拆而拆；优先在触碰具体职责时顺手抽离，降低一次性重构风险。
 - 文档落地后必须有完成情况文档或上下文摘要，否则新会话只能靠 git log 和散落方案猜当前状态。
